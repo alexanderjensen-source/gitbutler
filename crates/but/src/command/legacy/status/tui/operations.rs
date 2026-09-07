@@ -39,11 +39,10 @@ pub fn reload_legacy(
     let mut guard = ctx.exclusive_worktree_access();
 
     {
-        let meta = ctx.meta()?;
         let project_meta = ctx.project_meta()?;
         let (repo, mut ws, mut db) =
             ctx.workspace_mut_and_db_mut_with_perm(guard.write_permission())?;
-        ws.refresh_from_head(&repo, &meta, project_meta, &mut db)?;
+        ws.refresh_from_head(&repo, project_meta, &mut db.connection_mut())?;
     }
 
     let mut new_lines = Vec::new();
