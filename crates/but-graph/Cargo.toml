@@ -36,7 +36,6 @@ itertools.workspace = true
 
 [dev-dependencies]
 but-graph = { path = ".", features = ["legacy"] }
-but-meta = { workspace = true, features = ["legacy"] }
 but-testsupport.workspace = true
 
 gitbutler-reference.workspace = true
