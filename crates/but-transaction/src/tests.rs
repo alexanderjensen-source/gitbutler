@@ -420,7 +420,8 @@ fn create_reference_records_branch_stack_order_in_single_branch_mode() {
             .unwrap()
             .meta()
             .unwrap()
-            .branch_stack_order(main.as_ref()).map(<[_]>::to_vec),
+            .branch_stack_order(main.as_ref())
+            .map(<[_]>::to_vec),
         Some(vec![new_branch, main]),
         "single-branch transaction should persist the recorded branch order"
     );
@@ -464,7 +465,8 @@ fn create_reference_rolls_back_branch_stack_order_in_single_branch_mode() {
             .unwrap()
             .meta()
             .unwrap()
-            .branch_stack_order(main.as_ref()).map(<[_]>::to_vec),
+            .branch_stack_order(main.as_ref())
+            .map(<[_]>::to_vec),
         None,
         "rolled-back single-branch transaction should not persist branch order"
     );
@@ -1032,3 +1034,6 @@ fn remove_references() {
 
     assert_num_snapshots(&ctx, 1);
 }
+
+mod late_failure;
+mod linked_late_failure;
