@@ -497,6 +497,7 @@ const BranchSegment: FC<{
 					projectId={projectId}
 					segment={segment}
 					stackId={stack.id}
+					downstackPushStatus={downstackPushStatus}
 					behind={behind}
 					worktrees={worktrees}
 					checkCommit={checkCommit}
@@ -562,6 +563,8 @@ const SegmentContent: FC<{
 	setSize: number;
 	behind: number;
 	worktrees: WorktreePlacement;
+	/** What a push from this segment covers, which a worktree resting on one of its commits pushes too. */
+	downstackPushStatus: DownstackPushStatus;
 }> = ({
 	projectId,
 	segment,
@@ -581,6 +584,7 @@ const SegmentContent: FC<{
 	setSize,
 	behind,
 	worktrees,
+	downstackPushStatus,
 }) => {
 	const getCommitKey = useCallback(
 		(index: number) => segment.commits[index]?.id ?? index,
@@ -667,6 +671,7 @@ const SegmentContent: FC<{
 					worktree={worktree}
 					worktrees={worktrees}
 					behind={behind + 1}
+					beneath={downstackPushStatus}
 				/>
 			));
 	}
@@ -696,6 +701,7 @@ const SegmentContent: FC<{
 						below={next === undefined ? "LocalOnly" : commitGraphStatus(next)}
 						behind={behind}
 						lanes={lanesOn(commit, virtualRow.index)}
+						beneath={downstackPushStatus}
 						worktrees={worktrees}
 						projectId={projectId}
 						stackId={stackId}
@@ -728,6 +734,8 @@ const CommitItem: FC<{
 	behind: number;
 	/** The worktree lanes drawn above this commit, resting on it. */
 	lanes: ReadonlyArray<Worktree>;
+	/** What those lanes push beneath themselves: this commit's segment and below. */
+	beneath: DownstackPushStatus;
 	worktrees: WorktreePlacement;
 	projectId: string;
 	stackId: string | null;
@@ -745,6 +753,7 @@ const CommitItem: FC<{
 	below,
 	behind,
 	lanes,
+	beneath,
 	worktrees,
 	projectId,
 	stackId,
@@ -778,6 +787,7 @@ const CommitItem: FC<{
 					worktree={worktree}
 					worktrees={worktrees}
 					behind={behind + 1}
+					beneath={beneath}
 				/>
 			))}
 			<TreeItem
@@ -950,6 +960,7 @@ const StackC: FC<
 						worktree={worktree}
 						worktrees={worktrees}
 						behind={behind}
+						beneath={assert(downstackPushStatuses[0])}
 					/>
 				))}
 				{stack.segments.map((segment, index) => {
@@ -1013,6 +1024,7 @@ const StackC: FC<
 										projectId={projectId}
 										segment={segment}
 										stackId={stack.id}
+										downstackPushStatus={downstackPushStatus}
 										checkCommit={checkCommit}
 										onAmendCommit={onAmendCommit}
 										canAmendCommit={canAmendCommit}
