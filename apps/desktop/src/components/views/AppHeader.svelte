@@ -5,6 +5,7 @@
 	import IntegrateUpstreamModal from "$components/upstream/IntegrateUpstreamModal.svelte";
 	import { BACKEND } from "$lib/backend";
 	import { BASE_BRANCH_SERVICE } from "$lib/baseBranch/baseBranchService.svelte";
+	import { projectRunCommitHooks } from "$lib/config/config";
 	import { MODE_SERVICE } from "$lib/mode/modeService";
 	import { handleAddProjectOutcome } from "$lib/project/project";
 	import { PROJECTS_SERVICE } from "$lib/project/projectsService";
@@ -12,7 +13,16 @@
 	import { SETTINGS_SERVICE } from "$lib/settings/appSettings";
 	import { SHORTCUT_SERVICE } from "$lib/shortcuts/shortcutService";
 	import { inject } from "@gitbutler/core/context";
-	import { Button, Icon, OptionsGroup, Select, SelectItem, TestId, Tooltip } from "@gitbutler/ui";
+	import {
+		Button,
+		Icon,
+		OptionsGroup,
+		Select,
+		SelectItem,
+		TestId,
+		Toggle,
+		Tooltip,
+	} from "@gitbutler/ui";
 	import { focusable } from "@gitbutler/ui/focus/focusable";
 
 	type Props = {
@@ -37,6 +47,7 @@
 	const useCustomTitleBar = $derived(!($settingsStore?.ui.useNativeTitleBar ?? false));
 	const backend = inject(BACKEND);
 	const mode = $derived(modeService.mode(projectId));
+	const runCommitHooks = $derived(projectRunCommitHooks(projectId));
 	const currentMode = $derived(mode.response);
 	const currentBranchName = $derived.by(() => {
 		if (currentMode?.type === "OpenWorkspace") {
@@ -296,6 +307,19 @@
 			{/if}
 		</div>
 
+		<Tooltip text="Run Git Hooks">
+			<label class="chrome-run-hooks-toggle" for="runHooksToolbar">
+				<Icon name="script" color="var(--text-2)" />
+				<span class="text-12 text-bold">Hooks</span>
+				<Toggle
+					small
+					id="runHooksToolbar"
+					testId={TestId.ChromeHeaderRunHooksToggle}
+					bind:checked={$runCommitHooks}
+				/>
+			</label>
+		</Tooltip>
+
 		{#if currentMode && isNotInWorkspace}
 			<Tooltip text="Switch back to gitbutler/workspace">
 				<Button
@@ -350,6 +374,20 @@
 	:global(.chrome-header.single-branch .project-selector-btn) {
 		border-top-right-radius: 0;
 		border-bottom-right-radius: 0;
+	}
+
+	.chrome-run-hooks-toggle {
+		display: flex;
+		align-items: center;
+		height: var(--size-button);
+		padding: 4px 8px;
+		gap: 6px;
+		border: 1px solid
+			color-mix(in srgb, var(--btn-gray-outline) var(--btn-opacity-outline-border), transparent);
+		border-radius: var(--radius-button);
+		color: var(--btn-gray-outline-text);
+		cursor: pointer;
+		text-wrap: nowrap;
 	}
 
 	.project-selector-btn__content {

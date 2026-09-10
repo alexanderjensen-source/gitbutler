@@ -162,6 +162,7 @@ export enum TestId {
 	ChromeHeaderCreateBranchButton = "chrome-header-create-branch-button",
 	ChromeHeaderCreateCodegenSessionButton = "chrome-header-create-codegen-session-button",
 	ChromeHeaderCurrentBranch = "chrome-header-current-branch",
+	ChromeHeaderRunHooksToggle = "chrome-header-run-hooks-toggle",
 	ChromeHeaderSwitchBackToWorkspaceButton = "chrome-header-switch-back-to-workspace-button",
 	ChromeSideBarProjectSettingsButton = "chrome-sidebar-project-settings-button",
 	NotOnGitButlerBranchView = "not-on-gitbutler-branch-view",
