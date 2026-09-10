@@ -7,9 +7,9 @@
 	"agentSkillNotices": true,
 	"telemetry": {
 		// Whether the anonymous metrics are enabled.
-		"appMetricsEnabled": true,
+		"appMetricsEnabled": false,
 		// Whether anonymous error reporting is enabled.
-		"appErrorReportingEnabled": true,
+		"appErrorReportingEnabled": false,
 		/// Distinct ID, if reporting is enabled.
 		"appDistinctId": null,
 		// Whether settings have been migrated from the legacy Tauri store.

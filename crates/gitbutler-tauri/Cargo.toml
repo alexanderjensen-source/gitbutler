@@ -1,6 +1,6 @@
 [package]
 name = "gitbutler-tauri"
-version = "0.0.0"
+version = "0.22.4-alex"
 edition.workspace = true
 authors.workspace = true
 publish = false
