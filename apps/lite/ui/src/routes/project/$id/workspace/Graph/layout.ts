@@ -1,12 +1,13 @@
 import { addressEquals, commitAddress, type Address } from "#ui/addresses.ts";
 import { assert } from "#ui/assert.ts";
 import { remoteTrackingLabel } from "#ui/branch.ts";
+import { GRAPH_LANE_WIDTH, GRAPH_TRUNK_INSET } from "#ui/components/graph-spacing.ts";
 import type { RefInfo, Stack, TargetCommit, TargetCommitPage, Worktree } from "@gitbutler/but-sdk";
 
 /*
  * The stacks section as a graph: card order and which section rows show. Pure.
  *
- * One main line, the trunk, runs up the panel's edge from below the target's
+ * One main line, the trunk, runs up near the panel's edge from below the target's
  * row to the uncommitted files. Every stack card, and a moved-on target's, sits in
  * the column beside it and bends onto it in the gap under it. Rows draw their
  * own gutters, a column each for the lines behind them and the glyph
@@ -14,14 +15,10 @@ import type { RefInfo, Stack, TargetCommit, TargetCommitPage, Worktree } from "@
  */
 
 /**
- * The rows' inset in the graph. The trunk's column sits one 12px column left
- * of it, so its line, 8px in, is centred at x = 1 on the panel's edge, and the
- * first glyph column starts here. Whole pixels throughout: SVGs snap to them
- * where CSS boxes do not, and a fractional inset puts the two out of step. The
- * uncommitted files card carries no inset: the edge column is its whole
- * gutter (GraphEdge).
+ * GraphEdge's line is 1px into its canvas; regular glyphs are 8px in.
+ * Leave one lane between them while keeping the trunk at its shared inset.
  */
-export const ROW_INSET = 12 - 8 + 1;
+export const ROW_INSET = GRAPH_TRUNK_INSET + 1 + GRAPH_LANE_WIDTH - 8;
 /** The gap under a card, tall enough for a line to bend through. */
 export const CARD_GAP = 20;
 /** The gap under a worktree lane, which its line bends through. */
@@ -34,11 +31,13 @@ export const DOCKED_HEIGHT = 1 + 4 + 28 + 4;
 export const HEAD_DOCKED_HEIGHT = 6 + 28 + 1;
 /** A long run shows this much at first, and this much more with each ask. */
 const FIRST = 10;
-const MORE = 20;
+export const MORE_COMMITS = 20;
 
 type Folds = {
 	/** The target header's fold: the commits incoming from the target. */
 	incomingExpanded: boolean;
+	historyExpanded: boolean;
+	moreHistory: number;
 	/** How many times more of each run was asked for, by the run's id. */
 	moreRuns: Readonly<Record<string, number>>;
 };
@@ -86,6 +85,11 @@ export type Plan = {
 	incomingExpanded: boolean;
 	/** Commits on the target the workspace lacks, on their leg. Empty while folded. */
 	incoming: Array<Run>;
+	historyAvailable: boolean;
+	historyExpanded: boolean;
+	/** The workspace's target history, starting at its newest shared commit. */
+	history: Array<TargetCommit>;
+	historyHidden: number;
 	worktrees: WorktreePlacement;
 };
 
@@ -119,7 +123,7 @@ const incomingRuns = (line: ReadonlyArray<TargetItem>, folds: Folds): Array<Run>
 		if (item.type === "fork" || item.inWorkspace) return [];
 		const id = assert(item.commits[0]).commit.id;
 		const asked = folds.moreRuns[id] ?? 0;
-		const asFar = FIRST + asked * MORE;
+		const asFar = FIRST + asked * MORE_COMMITS;
 		const count = item.commits.length - asFar <= 1 ? item.commits.length : asFar;
 		return [
 			{
@@ -177,10 +181,14 @@ export const layout = (
 	listing: TargetCommitPage | undefined,
 	folds: Folds,
 	worktrees: ReadonlyArray<Worktree> = [],
+	olderPages: ReadonlyArray<TargetCommit> = [],
 ): Plan => {
 	const commits = listing?.commits ?? [];
 	const line = segmentAtForks(commits, stacks);
 	const forkOrder = line.flatMap((item) => (item.type === "fork" ? [item.commit.commit.id] : []));
+	const shared = commits.filter((commit) => commit.inWorkspace);
+	const history = folds.historyExpanded ? [...shared, ...olderPages] : [];
+	const historyCount = FIRST + folds.moreHistory * MORE_COMMITS;
 
 	// Deeper bases first; a base the listing does not reach counts as deepest,
 	// keeping the order given.
@@ -210,18 +218,38 @@ export const layout = (
 					},
 		incomingExpanded: folds.incomingExpanded,
 		incoming: folds.incomingExpanded ? incomingRuns(line, folds) : [],
+		historyAvailable: shared.length > 0,
+		historyExpanded: folds.historyExpanded,
+		history: history.slice(0, historyCount),
+		historyHidden: Math.max(0, history.length - historyCount),
 		worktrees: placeWorktrees(stacks, worktrees),
 	};
 };
 
 /** The section's rows as values, top to bottom, as the fold state shows them. The header is not a value. */
-export const sectionAddresses = (plan: Plan): Array<Address> =>
-	plan.incoming.flatMap((run) => run.shown.map(targetCommitAddress));
+export const foldAddresses = (plan: Plan, fold: "incoming" | "history"): Array<Address> =>
+	(fold === "incoming" ? plan.incoming.flatMap((run) => run.shown) : plan.history).map(
+		targetCommitAddress,
+	);
+
+export const sectionAddresses = (plan: Plan): Array<Address> => [
+	...foldAddresses(plan, "incoming"),
+	...foldAddresses(plan, "history"),
+];
 
 /** The review a commit on the target line landed, by commit id; null when none or not on the line. */
-export const targetCommitReview = (listing: TargetCommitPage | undefined, commitId: string) =>
-	listing?.commits.find((commit) => commit.commit.id === commitId)?.review ?? null;
+export const targetCommitReview = (
+	listing: TargetCommitPage | undefined,
+	commitId: string,
+	history: ReadonlyArray<TargetCommit> = [],
+) =>
+	listing?.commits.find((commit) => commit.commit.id === commitId)?.review ??
+	history.find((commit) => commit.commit.id === commitId)?.review ??
+	null;
 
 /** Whether a row sits in the section's fold, so a fold key on the row can close it. */
-export const inSection = (plan: Plan, address: Address): boolean =>
-	sectionAddresses(plan).some((other) => addressEquals(address, other));
+export const foldAt = (plan: Plan, address: Address): "incoming" | "history" | null => {
+	const inFold = (fold: "incoming" | "history") =>
+		foldAddresses(plan, fold).some((other) => addressEquals(address, other));
+	return inFold("incoming") ? "incoming" : inFold("history") ? "history" : null;
+};

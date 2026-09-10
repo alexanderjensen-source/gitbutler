@@ -2,8 +2,7 @@ import rowStyles from "../Row.module.css";
 import { setCursor } from "#ui/use-cursor.ts";
 import { commitTitle } from "#ui/commit.ts";
 import { classes } from "#ui/components/classes.ts";
-import { GraphSegment } from "#ui/components/GraphSegment.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
+import { GraphSegment, type GraphSegmentStatus } from "#ui/components/GraphSegment.tsx";
 import { RelativeTime } from "#ui/components/RelativeTime.tsx";
 import type { TargetCommit } from "@gitbutler/but-sdk";
 import { type FC, useState } from "react";
@@ -21,7 +20,9 @@ export const TargetCommitRow: FC<{
 	inert?: boolean;
 	/** Columns of the main line running behind the row, left of its rail. */
 	behind?: number;
-}> = ({ commit: targetCommit, positionInSet, setSize, inert, behind }) => {
+	railEnds?: boolean;
+	above?: GraphSegmentStatus;
+}> = ({ commit: targetCommit, positionInSet, setSize, inert, behind, railEnds, above }) => {
 	const { commit, review } = targetCommit;
 	const address = targetCommitAddress(targetCommit);
 	const isSelected = useIsSelected(address, "applied");
@@ -46,7 +47,13 @@ export const TargetCommitRow: FC<{
 			scrollSelectedIntoView
 			onSelect={() => setCursor("applied", address)}
 		>
-			<GraphSegment glyph="commit" status="Upstream" behind={behind} />
+			<GraphSegment
+				glyph="commit"
+				status={targetCommit.inWorkspace ? "Integrated" : "Upstream"}
+				above={above}
+				behind={behind}
+				railEnds={railEnds}
+			/>
 			<div className={styles.label}>
 				<RowLabelContainer>
 					<RowLabel singleLine>
@@ -65,17 +72,6 @@ export const TargetCommitRow: FC<{
 						{authorName !== "" && <>{authorName} </>}
 						<RelativeTime timestamp={commit.committedAt} now={now} />
 					</span>
-
-					{review !== null && (
-						<span
-							title={review.title}
-							className={classes(rowStyles.fadedText, styles.labelMetaItem)}
-						>
-							<Icon name="pr" />
-							{review.unitSymbol}
-							{review.number}
-						</span>
-					)}
 				</RowLabelFooter>
 			</div>
 		</Row>
