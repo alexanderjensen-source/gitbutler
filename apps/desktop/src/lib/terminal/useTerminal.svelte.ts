@@ -1,12 +1,10 @@
 import { PROJECTS_SERVICE } from "$lib/project/projectsService";
 import { PTY_SERVICE } from "$lib/terminal/terminalService";
 import { inject } from "@gitbutler/core/context";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
 
 /**
- * Attaches an xterm.js view to the lane's shell session, spawning one on first use.
- * Unmounting only detaches the view; the shell keeps running until killed.
+ * Shows the lane's terminal inside `container`, spawning it on first use.
+ * Unmounting only detaches the screen; the shell and its scrollback live on in `PtyService`.
  */
 export function useTerminal(params: {
 	projectId: () => string;
@@ -25,53 +23,39 @@ export function useTerminal(params: {
 		void generation;
 		if (!container) return;
 
-		const term = new Terminal({ cursorBlink: true, fontSize: 12 });
-		const fit = new FitAddon();
-		term.loadAddon(fit);
-		term.open(container);
-		fit.fit();
-
 		let disposed = false;
-		const cleanups: (() => unknown)[] = [];
+		let detach: (() => void) | undefined;
 
-		async function attach() {
+		async function attach(target: HTMLElement) {
 			const project = await projectsService.fetchProject(projectId);
 			if (disposed || !project) return;
-			const terminalId = await ptyService.getOrSpawn(laneId, {
-				cwd: project.path,
-				cols: term.cols,
-				rows: term.rows,
-			});
+			const { term, fit } = await ptyService.session(laneId, project.path);
 			if (disposed) return;
 
-			cleanups.push(
-				ptyService.onOutput(terminalId, (data) => term.write(data)),
-				ptyService.onExit(terminalId, () => {
-					ptyService.forgetLane(laneId, terminalId);
-					term.write("\r\n[process exited]\r\n");
-				}),
-			);
-			const input = term.onData((data) => ptyService.write(terminalId, data));
-			const resize = term.onResize(({ cols, rows }) => ptyService.resize(terminalId, cols, rows));
-			cleanups.push(
-				() => input.dispose(),
-				() => resize.dispose(),
-			);
-			await ptyService.resize(terminalId, term.cols, term.rows);
-		}
-		attach().catch((error: unknown) => {
-			const message = error instanceof Error ? error.message : JSON.stringify(error);
-			term.write(`\r\n[failed to start shell: ${message}]\r\n`);
-		});
+			// xterm can only `open` once; after that its element is moved between containers.
+			if (term.element) target.appendChild(term.element);
+			else term.open(target);
+			fit.fit();
+			term.refresh(0, term.rows - 1);
+			term.focus();
 
-		const observer = new ResizeObserver(() => fit.fit());
-		observer.observe(container);
+			const observer = new ResizeObserver(() => fit.fit());
+			observer.observe(target);
+			const element = term.element;
+			detach = () => {
+				observer.disconnect();
+				element?.remove();
+			};
+		}
+
+		attach(container).catch((error: unknown) => {
+			const message = error instanceof Error ? error.message : JSON.stringify(error);
+			container.textContent = `Failed to start shell: ${message}`;
+		});
 
 		return () => {
 			disposed = true;
-			observer.disconnect();
-			for (const cleanup of cleanups) cleanup();
-			term.dispose();
+			detach?.();
 		};
 	});
 
@@ -79,6 +63,9 @@ export function useTerminal(params: {
 		async restart() {
 			await ptyService.killLane(params.laneId());
 			generation++;
+		},
+		async close() {
+			await ptyService.killLane(params.laneId());
 		},
 	};
 }
