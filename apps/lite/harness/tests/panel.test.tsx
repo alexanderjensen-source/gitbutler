@@ -152,7 +152,10 @@ test("a watcher event refreshes the uncommitted files", async () => {
 	worktree = fixtureWorktreeChanges([fixtureFileChange("src/new-file.ts")]);
 	const event: WatcherEvent = {
 		name: "worktreeChanges",
-		payload: { type: "worktreeChanges", subject: { changes: worktree } },
+		payload: {
+			type: "worktreeChanges",
+			subject: { changes: worktree, changedPaths: ["src/new-file.ts"] },
+		},
 	};
 	panel.push(eventChannel, event);
 
@@ -180,9 +183,9 @@ test("someone else's review activity files one coalesced inbox entry and the unr
 		listReviewTimelineEvents: () => [],
 	});
 
-	// The PR chip proves the baseline listing landed; nothing is filed yet —
+	// The review title proves the baseline listing landed; nothing is filed yet —
 	// history must never replay as notifications.
-	await vi.waitFor(() => expect(panel.container.textContent).toContain("PR"), settle);
+	await vi.waitFor(() => expect(panel.container.textContent).toContain(review.title), settle);
 	expect(inboxEntries()).toHaveLength(0);
 
 	// Someone comments; the forge bumps the review and a fetch notices.
@@ -230,7 +233,7 @@ test("a mention left on a diff line is filed like any other", async () => {
 		listReviewTimelineEvents: () => [],
 	});
 
-	await vi.waitFor(() => expect(panel.container.textContent).toContain("PR"), settle);
+	await vi.waitFor(() => expect(panel.container.textContent).toContain(review.title), settle);
 
 	review = { ...review, modifiedAt: "2026-01-01T11:00:00Z" };
 	threads = [
@@ -294,7 +297,7 @@ test("a mention toasts even when the review's branch is not in the workspace", a
 		listReviewTimelineEvents: () => [],
 	});
 
-	await vi.waitFor(() => expect(panel.container.textContent).toContain("PR"), settle);
+	await vi.waitFor(() => expect(panel.container.textContent).toContain(mine.title), settle);
 
 	outside = { ...outside, modifiedAt: "2026-01-01T11:00:00Z" };
 	comments = [
@@ -344,7 +347,7 @@ test("loud activity is offered to the desktop, and its click lands on the entry"
 			shown.push(notice);
 		},
 	});
-	await vi.waitFor(() => expect(panel.container.textContent).toContain("PR"), settle);
+	await vi.waitFor(() => expect(panel.container.textContent).toContain(review.title), settle);
 
 	review = { ...review, modifiedAt: "2026-01-01T12:00:00Z" };
 	// Its own minute: entry ids carry the time, and the inbox module keeps an

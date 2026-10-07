@@ -9,6 +9,7 @@ import type {
 import type * as sdk from "@gitbutler/but-sdk";
 import { apiParamNames } from "@gitbutler/but-sdk/api-param-names";
 import type { GUISettings } from "./settings.js";
+import type { AvailabilitySnapshot, InstallationStatus } from "./updater-state.js";
 
 type SDK = Pick<
 	{
@@ -24,6 +25,11 @@ type SDK = Pick<
  * SDK's, plus the members electron implements itself.
  */
 export type LiteElectronApi = SDK & {
+	getUpdateStatus: () => Promise<InstallationStatus>;
+	checkForUpdates: () => Promise<AvailabilitySnapshot>;
+	downloadUpdate: (version: string) => Promise<void>;
+	installUpdate: () => Promise<void>;
+	onUpdateStatusChange: (callback: (state: InstallationStatus) => void) => () => void;
 	onAskpassPrompt: (callback: (event: AskpassPromptEvent) => void) => () => void;
 	askpassSubmitPromptResponse: (params: AskpassSubmitPromptResponseParams) => Promise<void>;
 	clipboardWriteText: (text: string) => Promise<void>;
@@ -33,6 +39,9 @@ export type LiteElectronApi = SDK & {
 	/** The settings shared with the other surfaces through the settings file. */
 	getAppSettings: () => Promise<AppSettings>;
 	getVersion: () => Promise<string>;
+	isPackaged: () => Promise<boolean>;
+	/** Install bundled CLI; false means administrator authorization was cancelled. */
+	installCli: () => Promise<boolean>;
 	isFullScreen: () => Promise<boolean>;
 	onFullScreenChange: (callback: (fullScreen: boolean) => void) => () => void;
 	/** A click on a desktop notification, by the id it was shown with. */
@@ -66,15 +75,22 @@ export type LiteElectronApi = SDK & {
 };
 
 /**
- * The SDK endpoints the renderer can call: all of them, each under its own
+ * The SDK endpoints the renderer can call, each under its own
  * name as the IPC channel, so a new declaration in Rust reaches `window.lite`
  * with nothing to keep in step.
  */
 // `Object.keys` erases key types; the record's keys are exactly these.
-export const exposedEndpoints = Object.keys(apiParamNames) as ReadonlyArray<Endpoint>;
+export const exposedEndpoints = Object.keys(apiParamNames).filter(
+	(name) => name !== "installCliV2",
+) as ReadonlyArray<Endpoint>;
 
 /** Members the main process answers itself rather than forwarding to the SDK. */
 export const localEndpoints = [
+	"getUpdateStatus",
+	"checkForUpdates",
+	"downloadUpdate",
+	"installUpdate",
+	"updateStatusChange",
 	"askpassPrompt",
 	"askpassSubmitPromptResponse",
 	"clipboardWriteText",
@@ -83,6 +99,8 @@ export const localEndpoints = [
 	"getAppSettings",
 	"getVersion",
 	"isFullScreen",
+	"isPackaged",
+	"installCli",
 	"notificationClick",
 	"openInWebBrowser",
 	"pathJoin",
@@ -100,7 +118,8 @@ export const localEndpoints = [
 ] as const;
 
 /** An endpoint the SDK exposes to JavaScript. */
-export type Endpoint = keyof typeof apiParamNames & keyof typeof sdk;
+// Source-path installation is host-only: renderers get parameterless installCli instead.
+export type Endpoint = Exclude<keyof typeof apiParamNames & keyof typeof sdk, "installCliV2">;
 
 /**
  * The payload for an endpoint, named.
@@ -171,6 +190,7 @@ export interface ShowNotificationParams {
 	body: string;
 }
 
+/** In CSS pixels relative to the viewport, as the renderer measures them. */
 export interface NativeMenuPosition {
 	x: number;
 	y: number;

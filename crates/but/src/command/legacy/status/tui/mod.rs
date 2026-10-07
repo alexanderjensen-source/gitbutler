@@ -7,13 +7,13 @@ use bstr::BString;
 use but_api::open::program::ProgramSpec;
 use but_ctx::Context;
 use but_settings::AppSettingsWithDiskSync;
-use crossterm::event::{Event, MouseEventKind};
+use crossterm::event::{Event, MouseButton, MouseEventKind};
 use gitbutler_operating_modes::OperatingMode;
 use gix::refs::FullName;
 use ratatui::prelude::*;
 
 use crate::{
-    CliId, CliResult,
+    ChangeSourceId, CliId, CliResult,
     args::atoms::ResolvedCliIdArg,
     command::{
         legacy::status::{
@@ -22,7 +22,7 @@ use crate::{
                 app::{
                     BranchMessage, CherryPickMessage, CommandMessage, CommandModeKind,
                     CommitMessage, JumpMessage, MoveMessage, NormalMode, PickChangesMode,
-                    RewordMessage, SquashMessage, StackMessage, UpdateContext,
+                    RewordMessage, SquashMessage, StackMessage, UpdateContext, WorktreeMessage,
                 },
                 backstack::{Backstack, BackstackEntry},
                 confirm::ConfirmMessage,
@@ -58,7 +58,7 @@ mod cursor;
 mod details;
 mod file_browser;
 mod fps;
-mod fuzzy_picker;
+pub mod fuzzy_picker;
 mod graph_extension;
 mod help;
 mod highlight;
@@ -265,6 +265,7 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
                         | Mode::MoveStack(..)
                         | Mode::CherryPick(..)
                         | Mode::Branch(..)
+                        | Mode::Worktree(..)
                         | Mode::Move(..) => {}
                     }
                 }
@@ -302,6 +303,7 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
                 | Mode::MoveStack(..)
                 | Mode::CherryPick(..)
                 | Mode::Branch(..)
+                | Mode::Worktree(..)
                 | Mode::Move(..) => {
                     messages.push(Message::JustRender);
                 }
@@ -314,6 +316,14 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
             messages.push(Message::SetHasFocus(false));
         }
         Event::Mouse(event) => match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if app.modal.is_none() {
+                    messages.push(Message::StatusClick(Position {
+                        x: event.column,
+                        y: event.row,
+                    }));
+                }
+            }
             MouseEventKind::ScrollDown => {
                 if mouse_is_over_help(app, terminal_area, event.column, event.row) {
                     messages.push(Message::Help(HelpMessage::ScrollDown(3)));
@@ -322,6 +332,10 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
                         messages.push(Message::DebugScrollDown(3));
                     } else if mouse_is_over_details(app, terminal_area, event.column, event.row) {
                         messages.push(Message::Details(DetailsMessage::ScrollDown(3)));
+                    } else if render::status_area_for_app(app, terminal_area)
+                        .is_some_and(|area| area.contains((event.column, event.row).into()))
+                    {
+                        messages.push(Message::StatusScroll(1));
                     }
                 }
             }
@@ -333,6 +347,10 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
                         messages.push(Message::DebugScrollUp(3));
                     } else if mouse_is_over_details(app, terminal_area, event.column, event.row) {
                         messages.push(Message::Details(DetailsMessage::ScrollUp(3)));
+                    } else if render::status_area_for_app(app, terminal_area)
+                        .is_some_and(|area| area.contains((event.column, event.row).into()))
+                    {
+                        messages.push(Message::StatusScroll(-1));
                     }
                 }
             }
@@ -410,6 +428,7 @@ pub enum Message {
     Quit,
     ConfirmAndQuit,
     EnterNormalModeAfterConfirmingOperation,
+    CloseCommitFileListAfterConfirmingOperation,
     Reload(Option<SelectAfterReload>, ReloadCause),
     ShowError(anyhow::Error),
     ShowToast {
@@ -421,6 +440,8 @@ pub enum Message {
     DropToBeDiscarded,
     GrowDetails,
     ShrinkDetails,
+    StatusClick(Position),
+    StatusScroll(isize),
     DebugScrollUp(usize),
     DebugScrollDown(usize),
     SetHasFocus(bool),
@@ -433,10 +454,11 @@ pub enum Message {
     MoveCursorDown(usize),
     MoveCursorPreviousSection,
     MoveCursorNextSection,
-    SelectUncommitted,
-    SelectMergeBase,
+    GotoTop,
+    GotoBottom,
     PickAndGotoBranch,
     SelectBranch(FullName),
+    SelectWorktree(BString),
 
     // Features
     Commit(CommitMessage),
@@ -453,6 +475,7 @@ pub enum Message {
     Jump(JumpMessage),
     CherryPick(CherryPickMessage),
     Branch(BranchMessage),
+    Worktree(WorktreeMessage),
     ToggleHelp,
     Mark,
     ClearMarks,
@@ -552,6 +575,7 @@ pub enum SelectAfterReload {
     },
     Branch(String),
     CliId(Box<CliId>),
+    Worktree(BString),
     Uncommitted,
 }
 
@@ -639,7 +663,7 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
                 | FilesMessage::ToggleFilesForSelectedCommit => false,
             },
             Message::Move(message) => match message {
-                MoveMessage::Confirm => true,
+                MoveMessage::Confirm | MoveMessage::MoveToNewBranch => true,
                 MoveMessage::Start | MoveMessage::ToggleInsertSide => false,
             },
             Message::CherryPick(message) => match message {
@@ -654,9 +678,15 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             },
             Message::Stack(message) => match message {
                 StackMessage::Unapply | StackMessage::MoveConfirm => true,
-                StackMessage::Enter | StackMessage::ShowApplyPicker | StackMessage::MoveStart => {
+                StackMessage::Start | StackMessage::ShowApplyPicker | StackMessage::MoveStart => {
                     false
                 }
+            },
+            Message::Worktree(message) => match message {
+                WorktreeMessage::New => true,
+                WorktreeMessage::Start
+                | WorktreeMessage::Archive
+                | WorktreeMessage::ShowUnarchivePicker => false,
             },
             Message::Details(message) => match message {
                 DetailsMessage::Deselect
@@ -706,6 +736,7 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
                 | Modal::CopySelectionPicker { .. }
                 | Modal::GotoBranchPicker { .. }
                 | Modal::ApplyStackPicker { .. }
+                | Modal::UnarchiveWorktreePicker { .. }
                 | Modal::ProgramPicker { .. }
                 | Modal::SwitchBranchPicker { .. }
                 | Modal::Help { .. } => false,
@@ -716,11 +747,14 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             | Message::Crash
             | Message::ConfirmAndQuit
             | Message::EnterNormalModeAfterConfirmingOperation
+            | Message::CloseCommitFileListAfterConfirmingOperation
             | Message::ShowError(..)
             | Message::ShowToast { .. }
             | Message::DropToBeDiscarded
             | Message::GrowDetails
             | Message::ShrinkDetails
+            | Message::StatusClick(_)
+            | Message::StatusScroll(_)
             | Message::DebugScrollUp(_)
             | Message::DebugScrollDown(_)
             | Message::SetHasFocus(_)
@@ -730,10 +764,11 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             | Message::MoveCursorDown(_)
             | Message::MoveCursorPreviousSection
             | Message::MoveCursorNextSection
-            | Message::SelectUncommitted
-            | Message::SelectMergeBase
+            | Message::GotoTop
+            | Message::GotoBottom
             | Message::PickAndGotoBranch
             | Message::SelectBranch(..)
+            | Message::SelectWorktree(..)
             | Message::ToggleHelp
             | Message::Mark
             | Message::ClearMarks
@@ -808,7 +843,13 @@ impl PartialEq<CliId> for Selectable {
                 }
             }
             Selectable::Uncommitted => {
-                return matches!(other, CliId::Uncommitted { .. });
+                return matches!(
+                    other,
+                    CliId::UncommittedArea {
+                        source: ChangeSourceId::Head,
+                        ..
+                    }
+                );
             }
         }
         false

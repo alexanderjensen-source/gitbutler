@@ -1,3 +1,4 @@
+import { Avatar } from "@gitbutler/ui-react/Avatar.tsx";
 import {
 	useAddReviewLabels,
 	useRemoveReviewLabel,
@@ -14,12 +15,19 @@ import {
 	repoLabelsQueryOptions,
 	reviewerCandidatesQueryOptions,
 } from "#ui/api/queries.ts";
-import { Badge, type BadgeVariant } from "#ui/components/Badge.tsx";
-import { getButtonClassName } from "#ui/components/Button.tsx";
-import { classes } from "#ui/components/classes.ts";
-import { Icon } from "#ui/components/Icon.tsx";
-import type { IconName } from "#ui/components/iconNames.ts";
-import { TooltipPopup } from "#ui/components/Tooltip.tsx";
+import { Badge, type BadgeVariant } from "@gitbutler/ui-react/Badge.tsx";
+import { Button } from "@gitbutler/ui-react/Button.tsx";
+import { Checkbox } from "@gitbutler/ui-react/Checkbox.tsx";
+import { FieldTextareaStyles } from "@gitbutler/ui-react/Field.tsx";
+import { Kbd } from "@gitbutler/ui-react/Kbd.tsx";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { TextLink } from "@gitbutler/ui-react/TextLink.tsx";
+import { Tag } from "@gitbutler/ui-react/Tag.tsx";
+import { RelativeTime } from "@gitbutler/ui-react/RelativeTime.tsx";
+import type { IconName } from "@gitbutler/ui-react/iconNames.ts";
+import { Tooltip } from "@gitbutler/ui-react/Tooltip.tsx";
+import { ScrollArea } from "@gitbutler/ui-react/ScrollArea.tsx";
 import {
 	type NativeMenuItem,
 	nativeMenuItem,
@@ -27,21 +35,26 @@ import {
 	showNativeMenuFromTrigger,
 } from "#ui/native-menu.ts";
 import { openLinkExternally } from "#ui/external-link.ts";
-import type { DraftPRExtras } from "#ui/pr.ts";
-import { formatAbsoluteTime, formatCompactDuration, formatRelativeTime } from "#ui/time.ts";
-import { useCopied } from "#ui/routes/project/$id/workspace/useCopied.ts";
-import { loginKey, sameLogin } from "#ui/review-users.ts";
-import type {
-	CiCheck,
-	ForgeReview,
-	ForgeReviewLabel,
-	ForgeReviewSubmission,
-	ForgeReviewUser,
-} from "@gitbutler/but-sdk";
-import { Tooltip } from "@base-ui/react";
+import {
+	type DraftPRExtras,
+	type ReviewerVerdict,
+	type ReviewerRow,
+	reviewerRows,
+	useMergeReadiness,
+	branchChecklistQueryOptions,
+	useUpdateBranchChecklist,
+} from "#ui/pr.ts";
+import {
+	formatAbsoluteTime,
+	formatCompactDuration,
+	formatRelativeTime,
+} from "@gitbutler/ui-react/time.ts";
+import { useCopied } from "#ui/components/useCopied.ts";
+import { sameLogin } from "#ui/review-users.ts";
+import type { CiCheck, ForgeReview, ForgeReviewUser } from "@gitbutler/but-sdk";
 import { useQuery } from "@tanstack/react-query";
 import { Match } from "effect";
-import { type FC, type MouseEvent, type ReactNode, useState } from "react";
+import { type FC, type MouseEvent, type ReactNode, useId, useState } from "react";
 import styles from "./PullRequestPanel.module.css";
 
 type ReviewStatus = "open" | "draft" | "merged" | "closed";
@@ -68,17 +81,42 @@ const statusBits = (status: ReviewStatus): [string, BadgeVariant, IconName] =>
 const Section: FC<{
 	heading: string;
 	action?: ReactNode;
-	className?: string;
+	collapsible?: boolean;
+	defaultExpanded?: boolean;
+	summary?: ReactNode;
 	children: ReactNode;
-}> = (p) => (
-	<div className={classes(styles.section, p.className)}>
-		<div className={styles.sectionHeader}>
-			<h4 className={classes("text-12", styles.heading)}>{p.heading}</h4>
-			{p.action}
+}> = ({ heading, action, collapsible = false, defaultExpanded = true, summary, children }) => {
+	const [expanded, setExpanded] = useState(defaultExpanded);
+	const contentId = useId();
+	return (
+		<div className={styles.section}>
+			<div className={styles.sectionHeader}>
+				<h4 className={classes("text-12", styles.heading)}>
+					{collapsible && (
+						<Button
+							variant="ghost"
+							size="small"
+							iconOnly
+							className={styles.sectionToggle}
+							aria-label={`${expanded ? "Collapse" : "Expand"} ${heading.toLowerCase()}`}
+							aria-expanded={expanded}
+							aria-controls={contentId}
+							onClick={() => setExpanded((current) => !current)}
+						>
+							<Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+						</Button>
+					)}
+					<span>{heading}</span>
+				</h4>
+				{action}
+			</div>
+			{summary}
+			<div id={contentId} className={styles.sectionContent} hidden={collapsible && !expanded}>
+				{(!collapsible || expanded) && children}
+			</div>
 		</div>
-		{p.children}
-	</div>
-);
+	);
+};
 
 /**
  * A native menu with no items opens as an empty rectangle, which reads as a
@@ -94,17 +132,16 @@ const orEmptyNotice = (items: Array<NativeMenuItem>, notice: string): Array<Nati
  */
 /** Quiet until its row is hovered, like the comment kebab. */
 const RemoveButton: FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
-	<button
+	<Button
 		aria-label={label}
-		className={classes(
-			getButtonClassName({ variant: "ghost", size: "small", iconOnly: true }),
-			styles.reviewerRemove,
-		)}
+		variant="ghost"
+		size="small"
+		iconOnly
+		className={styles.reviewerRemove}
 		onClick={onClick}
-		type="button"
 	>
 		<Icon name="cross" />
-	</button>
+	</Button>
 );
 
 /**
@@ -133,14 +170,15 @@ const ReviewerRow: FC<{
 					<Icon name={icon} style={{ color }} size={15} />
 				</span>
 			) : (
-				<button
+				<Button
 					aria-label="Withdraw review request"
-					className={getButtonClassName({ variant: "ghost", size: "small", iconOnly: true })}
+					variant="ghost"
+					size="small"
+					iconOnly
 					onBlur={() => setFocused(false)}
 					onClick={onWithdraw}
 					onFocus={() => setFocused(true)}
 					title="Withdraw review request"
-					type="button"
 				>
 					{/* The cross has no ring, so it sits a touch smaller than the
 					    verdicts to read as light. */}
@@ -149,7 +187,7 @@ const ReviewerRow: FC<{
 					) : (
 						<Icon name={icon} style={{ color }} size={15} />
 					)}
-				</button>
+				</Button>
 			)}
 		</div>
 	);
@@ -162,72 +200,37 @@ const pickerButton = (p: {
 	onClick: (evt: MouseEvent<HTMLButtonElement>) => void;
 }) =>
 	p.empty ? (
-		<button
-			className={getButtonClassName({ variant: "outline", size: "small" })}
-			onClick={p.onClick}
-			type="button"
-		>
+		<Button variant="outline" size="small" onClick={p.onClick}>
 			{p.label}
 			<Icon name={p.icon} />
-		</button>
+		</Button>
 	) : (
-		<button
-			aria-label={p.label}
-			className={getButtonClassName({ variant: "ghost", size: "small", iconOnly: true })}
-			onClick={p.onClick}
-			type="button"
-		>
+		<Button aria-label={p.label} variant="ghost" size="small" iconOnly onClick={p.onClick}>
 			<Icon name="plus" />
-		</button>
+		</Button>
 	);
 
 export const ReviewUser: FC<{ user: ForgeReviewUser }> = ({ user }) => (
 	<div className={classes("text-13", styles.user)} title={user.name ?? user.login}>
-		{user.avatarUrl !== null ? (
-			<img src={user.avatarUrl} className={styles.avatar} alt="" />
-		) : (
-			<span className={styles.avatar} />
-		)}
+		<Avatar src={user.avatarUrl} seed={user.login} size={18} />
 		<span className={styles.userLogin}>{user.login}</span>
 	</div>
 );
-
-const Label: FC<{ label: ForgeReviewLabel }> = ({ label }) => {
-	// GitHub sends bare hex color codes, GitLab prefixes them with `#`.
-	const color =
-		label.color === null ? null : label.color.startsWith("#") ? label.color : `#${label.color}`;
-
-	return (
-		<Badge
-			variant="lightGray"
-			size="large"
-			className={color === null ? undefined : styles.label}
-			style={color === null ? undefined : { "--label-color": color }}
-			title={label.description ?? undefined}
-		>
-			{label.name}
-		</Badge>
-	);
-};
 
 const CopyableBranch: FC<{ name: string }> = ({ name }) => {
 	const { copied, copy } = useCopied(name);
 
 	return (
-		<Tooltip.Root>
-			<Tooltip.Trigger
+		<Tooltip content="Copy branch name">
+			<button
+				type="button"
+				aria-label="Copy branch name"
 				className={styles.sourceBranch}
 				onClick={copy}
-				render={<button type="button" aria-label="Copy branch name" />}
 			>
 				{copied ? "Copied!" : name}
-			</Tooltip.Trigger>
-			<Tooltip.Portal>
-				<Tooltip.Positioner sideOffset={4}>
-					<Tooltip.Popup render={<TooltipPopup />}>Copy branch name</Tooltip.Popup>
-				</Tooltip.Positioner>
-			</Tooltip.Portal>
-		</Tooltip.Root>
+			</button>
+		</Tooltip>
 	);
 };
 
@@ -330,77 +333,78 @@ export const NewPullRequestPanel: FC<{
 	);
 
 	return (
-		<aside className={styles.panel}>
-			<Section
-				heading="Reviewers"
-				action={
-					canPickReviewers &&
-					pickerButton({
-						label: "Add reviewers",
-						icon: "user",
-						empty: pickedReviewers.length === 0,
-						onClick: openReviewerMenu,
-					})
-				}
-			>
-				{pickedReviewers.map(({ login, user }) => (
-					<div key={login} className={styles.reviewerRow}>
-						{user === undefined ? (
-							<span className={classes("text-13", styles.userLogin)}>{login}</span>
-						) : (
-							<ReviewUser user={user} />
-						)}
-						<RemoveButton
-							label={`Remove ${login}`}
-							onClick={() =>
-								onExtrasChange({
-									...extras,
-									reviewers: extras.reviewers.filter((entry) => entry !== login),
-								})
-							}
-						/>
-					</div>
-				))}
-			</Section>
+		<aside className={classes(styles.panel, styles.checklistRail)}>
+			<Checklist projectId={projectId} branchName={sourceBranch} readiness={null} />
+			<div className={styles.panelSections}>
+				<Section
+					heading="Reviewers"
+					collapsible={pickedReviewers.length > 0}
+					action={
+						canPickReviewers &&
+						pickerButton({
+							label: "Add reviewers",
+							icon: "user",
+							empty: pickedReviewers.length === 0,
+							onClick: openReviewerMenu,
+						})
+					}
+				>
+					{pickedReviewers.map(({ login, user }) => (
+						<div key={login} className={styles.reviewerRow}>
+							{user === undefined ? (
+								<span className={classes("text-13", styles.userLogin)}>{login}</span>
+							) : (
+								<ReviewUser user={user} />
+							)}
+							<RemoveButton
+								label={`Remove ${login}`}
+								onClick={() =>
+									onExtrasChange({
+										...extras,
+										reviewers: extras.reviewers.filter((entry) => entry !== login),
+									})
+								}
+							/>
+						</div>
+					))}
+				</Section>
 
-			<Section
-				heading="Labels"
-				action={
-					canPickLabels &&
-					pickerButton({
-						label: "Add labels",
-						icon: "tag",
-						empty: pickedLabels.length === 0,
-						onClick: openLabelMenu,
-					})
-				}
-			>
-				{pickedLabels.length > 0 && (
-					<div className={styles.labels}>
-						{pickedLabels.map((label) => (
-							<Label key={label.name} label={label} />
-						))}
-					</div>
-				)}
-			</Section>
+				<Section
+					heading="Labels"
+					action={
+						canPickLabels &&
+						pickerButton({
+							label: "Add labels",
+							icon: "tag",
+							empty: pickedLabels.length === 0,
+							onClick: openLabelMenu,
+						})
+					}
+				>
+					{pickedLabels.length > 0 && (
+						<div className={styles.labels}>
+							{pickedLabels.map((label) => (
+								<Tag
+									key={label.name}
+									name={label.name}
+									color={label.color}
+									description={label.description}
+								/>
+							))}
+						</div>
+					)}
+				</Section>
 
-			<Section heading="Branches">
-				<div className={classes("text-13", styles.branches)}>
-					<CopyableBranch name={sourceBranch} />
-					{targetBranch !== undefined && <TargetBranch name={targetBranch} />}
-				</div>
-			</Section>
+				<Section heading="Branches">
+					<div className={classes("text-13", styles.branches)}>
+						<CopyableBranch name={sourceBranch} />
+						{targetBranch !== undefined && <TargetBranch name={targetBranch} />}
+					</div>
+				</Section>
+			</div>
 		</aside>
 	);
 };
-
-const reportOpenFailure = (error: unknown) => {
-	// oxlint-disable-next-line no-console
-	console.error(error);
-};
-
-/** A failing check, carrying the dot colour its conclusion earns. */
-type ProblemCheck = { check: CiCheck; tone: "danger" | "warn" | "muted" };
 
 /** Wall time from a check's start to its completion, once both are known. */
 const checkDuration = (check: CiCheck): string | null => {
@@ -410,8 +414,24 @@ const checkDuration = (check: CiCheck): string | null => {
 	return Number.isNaN(ms) || ms < 0 ? null : formatCompactDuration(ms);
 };
 
-const ProblemCheckRow: FC<{ problem: ProblemCheck }> = ({ problem: { check, tone } }) => {
+const CheckRow: FC<{ check: CiCheck }> = ({ check }) => {
+	const status = typeof check.status === "string" ? check.status : check.status.complete.conclusion;
+	const [label, dotClassName] = Match.value(status).pipe(
+		Match.withReturnType<[string, string | undefined]>(),
+		Match.when("failure", () => ["Failed", styles.checkDotDanger]),
+		Match.when("timedOut", () => ["Timed out", styles.checkDotDanger]),
+		Match.when("actionRequired", () => ["Action required", styles.checkDotWarn]),
+		Match.when("inProgress", () => ["In progress", styles.checkDotWarn]),
+		Match.when("queued", () => ["Queued", styles.checkDotMuted]),
+		Match.when("success", () => ["Succeeded", styles.checkDotSafe]),
+		Match.when("neutral", () => ["Neutral", styles.checkDotMuted]),
+		Match.when("skipped", () => ["Skipped", styles.checkDotMuted]),
+		Match.when("cancelled", () => ["Cancelled", styles.checkDotMuted]),
+		Match.when("unknown", () => ["Unknown", styles.checkDotMuted]),
+		Match.exhaustive,
+	);
 	const duration = checkDuration(check);
+	const startedAt = check.startedAt === null ? Number.NaN : Date.parse(check.startedAt);
 
 	return (
 		<a
@@ -419,64 +439,78 @@ const ProblemCheckRow: FC<{ problem: ProblemCheck }> = ({ problem: { check, tone
 			onClick={openLinkExternally}
 			className={classes("text-12", styles.checkRow)}
 		>
-			<span
-				className={classes(
-					styles.checkDot,
-					Match.value(tone).pipe(
-						Match.when("danger", () => styles.checkDotDanger),
-						Match.when("warn", () => styles.checkDotWarn),
-						Match.when("muted", () => styles.checkDotMuted),
-						Match.exhaustive,
-					),
-				)}
-			/>
-			<span className={styles.checkName}>{check.name}</span>
-			<span className={styles.checkMeta}>
-				{duration !== null && (
-					<>
-						{duration}
-						<span>·</span>
-					</>
-				)}
-				<Icon name="arrow-up-right" size={14} />
+			<span className={classes(styles.checkDot, dotClassName)} />
+			<span className={styles.checkBody}>
+				<span className={styles.checkName} title={check.name}>
+					{check.name}
+				</span>
+				<span className={styles.checkMeta}>
+					<span>{label}</span>
+					{status === "inProgress" && Number.isFinite(startedAt) ? (
+						<>
+							<span>·</span>
+							<RelativeTime timestamp={startedAt} compact />
+						</>
+					) : duration !== null ? (
+						<>
+							<span>·</span>
+							<span>{duration}</span>
+						</>
+					) : null}
+				</span>
 			</span>
+			<Icon name="arrow-up-right" size={14} className={styles.checkLinkIcon} />
 		</a>
 	);
 };
 
-/**
- * CI at a glance: a bar apportioned between the checks that passed, are still
- * running and failed, the same three as counts, and a row per failing check.
- */
 const ChecksSection: FC<{ projectId: string; reference: string }> = ({ projectId, reference }) => {
-	const { data } = useQuery(
-		listCIChecksQueryOptions({ projectId, reference, polling: "priority" }),
-	);
+	const { data } = useQuery({
+		...listCIChecksQueryOptions({ projectId, reference, polling: "priority" }),
+		select: ({ aggregate }) =>
+			aggregate === null
+				? null
+				: {
+						aggregate,
+						checks: [
+							...aggregate.failure,
+							...aggregate.timedOut,
+							...aggregate.actionRequired,
+							...aggregate.inProgress,
+							...aggregate.queued,
+							...aggregate.cancelled,
+							...aggregate.unknown,
+							...aggregate.success,
+							...aggregate.neutral,
+							...aggregate.skipped,
+						],
+					},
+	});
 	const aggregate = data?.aggregate ?? null;
 	if (aggregate === null) return null;
 
-	// Cancelled checks didn't pass either, so they join the problem list — with
-	// a muted dot, since nothing went wrong so much as stopped.
-	const problems: Array<ProblemCheck> = [
-		...aggregate.failure.map((check): ProblemCheck => ({ check, tone: "danger" })),
-		...aggregate.timedOut.map((check): ProblemCheck => ({ check, tone: "danger" })),
-		...aggregate.actionRequired.map((check): ProblemCheck => ({ check, tone: "warn" })),
-		...aggregate.cancelled.map((check): ProblemCheck => ({ check, tone: "muted" })),
-	];
+	const failed = aggregate.failure.length + aggregate.timedOut.length;
+	const actionRequired = aggregate.actionRequired.length;
+	const cancelled = aggregate.cancelled.length;
 	// A check of unknown state hasn't resolved, so it waits with the pending.
 	const pending = aggregate.inProgress.length + aggregate.queued.length + aggregate.unknown.length;
 	const passed = aggregate.success.length + aggregate.neutral.length;
 	const skipped = aggregate.skipped.length;
 	// Skipped checks ran nothing, so they're counted but not apportioned.
 	const segments = [
-		{ key: "passed", count: passed, className: styles.barPassed },
+		{ key: "failed", count: failed, className: styles.barFailed },
+		{ key: "actionRequired", count: actionRequired, className: styles.barActionRequired },
 		{ key: "pending", count: pending, className: styles.barPending },
-		{ key: "failed", count: problems.length, className: styles.barFailed },
+		{ key: "cancelled", count: cancelled, className: styles.barPending },
+		{ key: "passed", count: passed, className: styles.barPassed },
 	].filter((segment) => segment.count > 0);
 
 	return (
-		<Section heading="Checks">
-			<div className={styles.checks}>
+		<Section
+			heading="Checks"
+			collapsible
+			defaultExpanded={false}
+			summary={
 				<div className={styles.checksSummary}>
 					<div className={styles.checksBar}>
 						{segments.map((segment) => (
@@ -489,70 +523,32 @@ const ChecksSection: FC<{ projectId: string; reference: string }> = ({ projectId
 					</div>
 
 					<div className={classes("text-12", styles.checksCounts)}>
-						{problems.length > 0 && (
-							<span className={styles.countFailed}>{problems.length} failed</span>
-						)}
+						{failed > 0 && <span className={styles.countFailed}>{failed} failed</span>}
 						{passed > 0 && (
 							<span className={styles.countPassed}>
-								{problems.length === 0 && pending === 0
-									? `All ${passed} passed`
-									: `${passed} passed`}
+								{passed === aggregate.total ? `All ${passed} passed` : `${passed} passed`}
 							</span>
 						)}
 						{pending > 0 && <span className={styles.countPending}>{pending} pending</span>}
+						{actionRequired > 0 && (
+							<span className={styles.countActionRequired}>{actionRequired} action required</span>
+						)}
+						{cancelled > 0 && <span className={styles.countSkipped}>{cancelled} cancelled</span>}
 						{skipped > 0 && <span className={styles.countSkipped}>{skipped} skipped</span>}
 					</div>
 				</div>
-
-				{problems.length > 0 && (
-					<>
-						<div className={styles.checksDivider} />
-						<div className={styles.checksList}>
-							{problems.map((problem) => (
-								<ProblemCheckRow key={problem.check.id} problem={problem} />
-							))}
-						</div>
-					</>
-				)}
-			</div>
+			}
+		>
+			<div className={styles.checksDivider} />
+			<ScrollArea className={styles.checksList} viewportClassName={styles.checksViewport}>
+				<section aria-label="Check jobs">
+					{data?.checks.map((check) => (
+						<CheckRow key={check.id} check={check} />
+					))}
+				</section>
+			</ScrollArea>
 		</Section>
 	);
-};
-
-/** Dismissals collapse to "commented", so they never appear as a verdict. */
-type ReviewerVerdict = "approved" | "changesRequested" | "commented" | "awaiting";
-
-type ReviewerRow = { user: ForgeReviewUser; verdict: ReviewerVerdict };
-
-/**
- * One row per reviewer: everyone still requested (awaiting) plus everyone
- * who submitted a review, carrying their effective verdict. A comment-only
- * submission never overrides an earlier approval or change request, and a
- * dismissal drops the verdict back to commented.
- */
-const reviewerRows = (
-	requested: Array<ForgeReviewUser>,
-	submissions: Array<ForgeReviewSubmission>,
-): Array<ReviewerRow> => {
-	const byLogin = new Map<string, ReviewerRow>();
-	for (const submission of submissions) {
-		if (submission.author === null) continue;
-		const existing = byLogin.get(loginKey(submission.author.login));
-		const verdict = Match.value(submission.state).pipe(
-			Match.withReturnType<ReviewerVerdict>(),
-			Match.when("approved", () => "approved"),
-			Match.when("changesRequested", () => "changesRequested"),
-			Match.when("commented", () => existing?.verdict ?? "commented"),
-			Match.when("dismissed", () => "commented"),
-			Match.exhaustive,
-		);
-		byLogin.set(loginKey(submission.author.login), { user: submission.author, verdict });
-	}
-	for (const user of requested) {
-		const key = loginKey(user.login);
-		if (!byLogin.has(key)) byLogin.set(key, { user, verdict: "awaiting" });
-	}
-	return [...byLogin.values()];
 };
 
 const verdictBits = (verdict: ReviewerVerdict): [IconName, string, string] =>
@@ -562,17 +558,193 @@ const verdictBits = (verdict: ReviewerVerdict): [IconName, string, string] =>
 		Match.when("changesRequested", () => [
 			"cross-circle",
 			"var(--fill-danger-bg)",
-			"Requested changes",
+			"Changes requested",
 		]),
 		Match.when("commented", () => ["eye", "var(--text-3)", "Commented"]),
 		Match.when("awaiting", () => ["clock", "var(--text-3)", "Awaiting review"]),
 		Match.exhaustive,
 	);
 
+type MergeReadiness = ReturnType<typeof useMergeReadiness>;
+
+/** The branch's to-dos, under the computed checks once the branch has a pull request. */
+const Checklist: FC<{
+	projectId: string;
+	branchName: string;
+	readiness: MergeReadiness | null;
+}> = ({ projectId, branchName, readiness }) => {
+	const {
+		data: items,
+		isError,
+		refetch,
+	} = useQuery(branchChecklistQueryOptions(projectId, branchName));
+	const {
+		mutate: updateItems,
+		isPending: isSaving,
+		isError: saveFailed,
+	} = useUpdateBranchChecklist(projectId, branchName);
+	const [adding, setAdding] = useState(false);
+	const [label, setLabel] = useState("");
+	const checkedCount = items?.filter((item) => item.checked).length ?? 0;
+
+	return (
+		<section className={styles.checklist} aria-label="Checklist">
+			<div className={styles.checklistHeader}>
+				<h4>Checklist</h4>
+				<span className={styles.checklistProgress}>
+					{[
+						readiness !== null &&
+							readiness.rows.length > 0 &&
+							`${readiness.clearCount} of ${readiness.rows.length} checks`,
+						items !== undefined && `${checkedCount} of ${items.length} to-dos`,
+					]
+						.filter(Boolean)
+						.join(" · ")}
+				</span>
+			</div>
+			{readiness !== null && readiness.headline !== null && (
+				<strong className={styles.checklistHeadline} data-tone={readiness.tone}>
+					{readiness.headline}
+				</strong>
+			)}
+			{readiness !== null && readiness.rows.length > 0 && (
+				<ul className={styles.derivedRows} aria-label="Computed checks">
+					{readiness.rows.map((row) => (
+						<li key={row.label} className={styles.readinessRow}>
+							<span className={styles.readinessDot} data-tone={row.tone} aria-hidden="true" />
+							{row.label}
+						</li>
+					))}
+				</ul>
+			)}
+			<fieldset className={styles.manualItems} aria-label="To-dos">
+				{items?.map((item) => (
+					<div key={item.id} className={styles.manualRow} data-checked={item.checked}>
+						<label className={styles.manualLabel}>
+							<Checkbox
+								className={styles.manualCheckbox}
+								checked={item.checked}
+								disabled={isSaving}
+								onCheckedChange={(checked) => updateItems({ type: "check", id: item.id, checked })}
+							/>
+							<span className={styles.manualText}>{item.label}</span>
+						</label>
+						<Button
+							aria-label={`Remove ${item.label}`}
+							variant="ghost"
+							size="small"
+							iconOnly
+							className={styles.removeItem}
+							disabled={isSaving}
+							onClick={() => updateItems({ type: "remove", id: item.id })}
+						>
+							<Icon name="cross" size={12} />
+						</Button>
+					</div>
+				))}
+				{isError ? (
+					<output className={styles.checklistError}>
+						Could not load your to-dos.{" "}
+						<button type="button" className={styles.addItem} onClick={() => void refetch()}>
+							Retry
+						</button>
+					</output>
+				) : items === undefined ? (
+					<span className={styles.checklistProgress}>Loading to-dos…</span>
+				) : adding ? (
+					<form
+						className={styles.addItemForm}
+						onSubmit={(event) => {
+							event.preventDefault();
+							const text = label.trim();
+							if (text === "" || isSaving) return;
+							updateItems(
+								{ type: "add", item: { id: crypto.randomUUID(), label: text, checked: false } },
+								{
+									onSuccess: () => {
+										setLabel("");
+										setAdding(false);
+									},
+								},
+							);
+						}}
+					>
+						<FieldTextareaStyles
+							className={styles.addItemField}
+							aria-label="To-do"
+							placeholder="New to-do"
+							rows={1}
+							value={label}
+							disabled={isSaving}
+							onChange={(event) => setLabel(event.target.value)}
+							ref={(input) => input?.focus()}
+							onKeyDown={(event) => {
+								if (event.key === "Escape") {
+									event.stopPropagation();
+									setAdding(false);
+									setLabel("");
+								} else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+									event.preventDefault();
+									event.currentTarget.form?.requestSubmit();
+								}
+							}}
+						/>
+						<div className={styles.addItemActions}>
+							<Button
+								variant="ghost"
+								size="small"
+								disabled={isSaving}
+								onClick={() => {
+									setAdding(false);
+									setLabel("");
+								}}
+							>
+								Cancel
+							</Button>
+							<Button
+								type="submit"
+								variant="gray"
+								size="small"
+								disabled={isSaving || label.trim() === ""}
+							>
+								Add
+								<Kbd hotkey="Mod+Enter" variant="button" />
+							</Button>
+						</div>
+					</form>
+				) : (
+					<button
+						type="button"
+						aria-label="Add to-do"
+						className={styles.addItem}
+						onClick={() => setAdding(true)}
+					>
+						+ To-do
+					</button>
+				)}
+				{saveFailed && (
+					<output className={styles.checklistError}>Could not save your to-dos. Try again.</output>
+				)}
+			</fieldset>
+		</section>
+	);
+};
+
+const ReviewChecklist: FC<{ projectId: string; branchName: string; review: ForgeReview }> = ({
+	projectId,
+	branchName,
+	review,
+}) => {
+	const readiness = useMergeReadiness(projectId, review);
+	return <Checklist projectId={projectId} branchName={branchName} readiness={readiness} />;
+};
+
 export const PullRequestPanel: FC<{
 	projectId: string;
+	/** The local branch; the forge's name for it, `review.sourceBranch`, can differ. */
+	sourceBranch: string;
 	review: ForgeReview;
-}> = ({ projectId, review }) => {
+}> = ({ projectId, sourceBranch, review }) => {
 	const { data: forgeInfo } = useQuery(forgeInfoOptions(projectId));
 	const { data: reviewers } = useQuery({
 		...listReviewSubmissionsQueryOptions({ projectId, reviewId: review.number }),
@@ -597,18 +769,13 @@ export const PullRequestPanel: FC<{
 	const { mutate: removeReviewLabel } = useRemoveReviewLabel(projectId);
 	const { mutate: requestReview } = useRequestReview(projectId);
 	const { mutate: withdrawReviewRequest } = useWithdrawReviewRequest(projectId);
-	// Stacked above the description, the whole card would push it out of
-	// view, so there the sections marked foldable — the reference ones,
-	// Branches and Created — hide until asked. The footer that asks only
-	// renders in that layout (see the CSS).
-	const [showsAll, setShowsAll] = useState(false);
 	const { isPending: isDraftinessPending, mutate: setReviewDraftiness } =
 		useSetReviewDraftiness(projectId);
 	const { isPending: isUpdateReviewPending, mutate: updateReview } = useUpdateReview(projectId);
 
 	const status = reviewStatus(review);
 	// A merged review is final; anything else can move between open, draft and
-	// closed from the status badge.
+	// closed from the Status section's menu.
 	const canSwitchStatus = status !== "merged";
 	const isStatusPending = isDraftinessPending || isUpdateReviewPending;
 
@@ -721,130 +888,123 @@ export const PullRequestPanel: FC<{
 		<Badge variant={statusVariant} size="large">
 			<Icon name={statusIcon} size={12} />
 			{statusLabel}
-			{canSwitchStatus && <Icon name="chevron-down" size={12} />}
 		</Badge>
 	);
 
 	const createdAtMs = review.createdAt === null ? null : Date.parse(review.createdAt);
 
-	const handleOpen = (evt: MouseEvent<HTMLAnchorElement>): void => {
-		evt.preventDefault();
-		window.lite.openInWebBrowser(review.htmlUrl).catch(reportOpenFailure);
-	};
-
 	return (
-		<aside className={styles.panel} data-collapsed={showsAll ? undefined : ""}>
-			<Section
-				heading="Status"
-				action={
-					<div className={styles.statusActions}>
-						{canSwitchStatus ? (
-							<button
-								aria-label="Change status"
-								className={styles.statusTrigger}
-								disabled={isStatusPending}
-								onClick={openStatusMenu}
-								type="button"
-							>
-								{statusBadge}
-							</button>
-						) : (
-							statusBadge
-						)}
-						<a
-							href={review.htmlUrl}
-							onClick={handleOpen}
-							className={classes("text-12", styles.link, styles.prLink)}
-						>
-							{review.unitSymbol}
-							{review.number}
-							<Icon name="arrow-up-right" size={12} />
-						</a>
-					</div>
-				}
-			>
-				{null}
-			</Section>
-
-			<Section
-				heading="Reviewers"
-				action={
-					canPickReviewers &&
-					pickerButton({
-						label: "Add reviewers",
-						icon: "user",
-						empty: reviewerList.length === 0,
-						onClick: openReviewerMenu,
-					})
-				}
-			>
-				{reviewerList.map(({ user, verdict }) => (
-					<ReviewerRow
-						key={user.id}
-						user={user}
-						verdict={verdict}
-						onWithdraw={
-							canManage && verdict === "awaiting"
-								? () =>
-										withdrawReviewRequest({
-											projectId,
-											reviewId: review.number,
-											logins: [user.login],
-										})
-								: null
-						}
-					/>
-				))}
-			</Section>
-
-			<Section
-				heading="Labels"
-				action={
-					canPickLabels &&
-					pickerButton({
-						label: "Add labels",
-						icon: "tag",
-						empty: review.labels.length === 0,
-						onClick: openLabelMenu,
-					})
-				}
-			>
-				{review.labels.length > 0 && (
-					<div className={styles.labels}>
-						{review.labels.map((label) => (
-							<Label key={label.name} label={label} />
-						))}
-					</div>
-				)}
-			</Section>
-
-			{forgeInfo?.capabilities.checks === true && (
-				<ChecksSection projectId={projectId} reference={review.sourceBranch} />
-			)}
-
-			<Section heading="Branches" className={styles.foldable}>
-				<div className={classes("text-13", styles.branches)}>
-					<CopyableBranch name={review.sourceBranch} />
-					<TargetBranch name={review.targetBranch} />
-				</div>
-			</Section>
-
-			{createdAtMs !== null && (
-				<Section heading="Created" className={styles.foldable}>
-					<span className={classes("text-13", styles.created)}>
-						{formatRelativeTime(createdAtMs)}, {formatAbsoluteTime(createdAtMs)}
-					</span>
-				</Section>
-			)}
-
-			<div className={styles.panelFooter}>
-				<button
-					className={classes("text-13", styles.panelFooterToggle)}
-					onClick={() => setShowsAll((current) => !current)}
-					type="button"
+		<aside className={classes(styles.panel, styles.checklistRail)}>
+			<ReviewChecklist
+				key={review.htmlUrl}
+				projectId={projectId}
+				branchName={sourceBranch}
+				review={review}
+			/>
+			<div className={styles.panelSections}>
+				<Section
+					heading="Status"
+					action={
+						<div className={styles.statusActions}>
+							{statusBadge}
+							<TextLink href={review.htmlUrl} className="text-12" onClick={openLinkExternally}>
+								{review.unitSymbol}
+								{review.number}
+							</TextLink>
+							{canSwitchStatus && (
+								<Button
+									aria-label="Change status"
+									variant="ghost"
+									size="small"
+									iconOnly
+									disabled={isStatusPending}
+									onClick={openStatusMenu}
+								>
+									<Icon name="chevron-down" />
+								</Button>
+							)}
+						</div>
+					}
 				>
-					{showsAll ? "Show less" : "Show all"}
-				</button>
+					{null}
+				</Section>
+
+				{forgeInfo?.capabilities.checks === true && (
+					<ChecksSection projectId={projectId} reference={review.sourceBranch} />
+				)}
+
+				<Section
+					heading="Reviewers"
+					collapsible={reviewerList.length > 0}
+					action={
+						canPickReviewers &&
+						pickerButton({
+							label: "Add reviewers",
+							icon: "user",
+							empty: reviewerList.length === 0,
+							onClick: openReviewerMenu,
+						})
+					}
+				>
+					{reviewerList.map(({ user, verdict }) => (
+						<ReviewerRow
+							key={user.id}
+							user={user}
+							verdict={verdict}
+							onWithdraw={
+								canManage && verdict === "awaiting"
+									? () =>
+											withdrawReviewRequest({
+												projectId,
+												reviewId: review.number,
+												logins: [user.login],
+											})
+									: null
+							}
+						/>
+					))}
+				</Section>
+
+				<Section
+					heading="Labels"
+					action={
+						canPickLabels &&
+						pickerButton({
+							label: "Add labels",
+							icon: "tag",
+							empty: review.labels.length === 0,
+							onClick: openLabelMenu,
+						})
+					}
+				>
+					{review.labels.length > 0 && (
+						<div className={styles.labels}>
+							{review.labels.map((label) => (
+								<Tag
+									key={label.name}
+									name={label.name}
+									color={label.color}
+									description={label.description}
+								/>
+							))}
+						</div>
+					)}
+				</Section>
+
+				<Section heading="Branches">
+					<div className={classes("text-13", styles.branches)}>
+						<CopyableBranch name={review.sourceBranch} />
+						<TargetBranch name={review.targetBranch} />
+					</div>
+				</Section>
+
+				{createdAtMs !== null && (
+					<Section heading="Created">
+						<span className={classes("text-13", styles.created)}>
+							{formatRelativeTime(createdAtMs)}, {formatAbsoluteTime(createdAtMs)}
+						</span>
+					</Section>
+				)}
 			</div>
 		</aside>
 	);

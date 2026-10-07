@@ -40,6 +40,7 @@ export declare const apiParamNames: {
 	readonly commitInsertBlank: readonly ["projectId", "relativeTo", "side", "dryRun"];
 	readonly commitMove: readonly ["projectId", "subjectCommitIds", "relativeTo", "side", "dryRun"];
 	readonly commitMoveChangesBetween: readonly ["projectId", "sourceCommitId", "destinationCommitId", "changes", "dryRun"];
+	readonly commitRangeDiff: readonly ["projectId", "oldest", "newest"];
 	readonly commitReword: readonly ["projectId", "commitId", "message", "dryRun"];
 	readonly commitSquash: readonly ["projectId", "subjectCommitIds", "targetCommitId", "howToCombineMessages", "dryRun"];
 	readonly commitUncommit: readonly ["projectId", "subjectCommitIds", "assignTo", "dryRun"];
@@ -86,6 +87,7 @@ export declare const apiParamNames: {
 	readonly headInfo: readonly ["projectId"];
 	readonly initApplicationNamespace: readonly ["identifier"];
 	readonly initGithubDeviceOauth: readonly [];
+	readonly installCliV2: readonly ["cliPath", "symlinkPolicy"];
 	readonly listAvailableReviewTemplates: readonly ["projectId"];
 	readonly listBranches: readonly ["projectId", "filter"];
 	readonly listCiChecks: readonly ["projectId", "reference", "cacheConfig"];
@@ -109,12 +111,12 @@ export declare const apiParamNames: {
 	readonly loginAndPersist: readonly ["token"];
 	readonly mergeReview: readonly ["projectId", "reviewId", "mergeMethod"];
 	readonly moveBranch: readonly ["projectId", "subjectBranch", "targetBranch", "dryRun"];
+	readonly newReviewTarget: readonly ["projectId", "branch"];
 	readonly openInProgram: readonly ["projectId", "programId", "path", "lineNr"];
 	readonly openInTerminal: readonly ["terminalId", "path"];
 	readonly operatingMode: readonly ["projectId"];
 	readonly peelRestoreSnapshot: readonly ["projectId", "sha"];
 	readonly publishReview: readonly ["projectId", "params"];
-	readonly removeBranch: readonly ["projectId", "stackId", "branchName"];
 	readonly removeCommentReaction: readonly ["projectId", "commentId", "reactionId"];
 	readonly removeReviewLabel: readonly ["projectId", "reviewId", "label"];
 	readonly removeReviewReaction: readonly ["projectId", "reviewId", "reactionId"];
@@ -157,6 +159,7 @@ export declare const apiParamNames: {
 	readonly workspaceIntegrateUpstream: readonly ["projectId", "updates", "dryRun"];
 	readonly workspaceRecreate: readonly ["projectId"];
 	readonly workspaceTargetCommits: readonly ["projectId", "from", "limit"];
+	readonly worktreeNew: readonly ["projectId", "newRef"];
 	readonly worktreeRemove: readonly ["projectId", "name", "force"];
 	readonly worktreeSetArchived: readonly ["projectId", "name", "archived"];
 	readonly worktreesList: readonly ["projectId"];

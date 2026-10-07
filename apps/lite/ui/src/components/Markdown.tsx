@@ -1,9 +1,16 @@
 import { guiSettingsQueryOptions } from "#ui/api/queries.ts";
-import { classes } from "#ui/components/classes.ts";
-import { Icon } from "#ui/components/Icon.tsx";
+import { reportError } from "#ui/error-reporting.ts";
+import { Button } from "@gitbutler/ui-react/Button.tsx";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { TextLink } from "@gitbutler/ui-react/TextLink.tsx";
+import { Tooltip } from "@gitbutler/ui-react/Tooltip.tsx";
+import { ScrollArea } from "@gitbutler/ui-react/ScrollArea.tsx";
+import { useCopied } from "#ui/components/useCopied.ts";
 import { defaultSettings } from "#ui/settings.ts";
+import { openLinkExternally } from "#ui/external-link.ts";
 import { useQuery } from "@tanstack/react-query";
-import type { CSSProperties, FC, MouseEvent } from "react";
+import type { CSSProperties, FC, MouseEvent, ReactNode } from "react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -17,13 +24,13 @@ import styles from "./Markdown.module.css";
 const isExternalUrl = (url: string | undefined): url is string =>
 	url !== undefined && (url.startsWith("http://") || url.startsWith("https://"));
 
+/** For the image anchors, whose source may not be a URL at all. */
 const openExternally = (evt: MouseEvent<HTMLAnchorElement>): void => {
 	evt.preventDefault();
 	const url = evt.currentTarget.href;
 	if (isExternalUrl(url)) {
 		window.lite.openInWebBrowser(url).catch((error: unknown) => {
-			// oxlint-disable-next-line no-console
-			console.error(error);
+			reportError(error);
 		});
 	}
 };
@@ -141,6 +148,58 @@ const CodeBlock: FC<{ language: string; code: string }> = ({ language, code }) =
 const fencedLanguage = (className: string | undefined): string | undefined =>
 	/language-([\w+#-]+)/.exec(className ?? "")?.[1];
 
+/** The syntax tree react-markdown hands each component, reduced to what reading text needs. */
+type HastNode = {
+	type: string;
+	value?: string;
+	children?: Array<HastNode>;
+};
+
+const hastText = (node: HastNode): string =>
+	node.type === "text" ? (node.value ?? "") : (node.children ?? []).map(hastText).join("");
+
+/**
+ * A fenced code block with a button that copies its text. The button sits on
+ * the block's corner rather than in the `<pre>`, which scrolls sideways and
+ * would carry it away; the block's chrome moves out with it.
+ */
+const Pre: FC<{ node?: HastNode; children?: ReactNode }> = ({ node, children }) => {
+	// A fence's text ends with the newline that closed it, which nobody wants pasted.
+	const code = node === undefined ? "" : hastText(node).replace(/\n$/, "");
+	const { copied, copy } = useCopied(code);
+
+	return (
+		<div className={styles.codeBlock}>
+			<ScrollArea>
+				<pre>{children}</pre>
+			</ScrollArea>
+			<Tooltip content={copied ? "Copied" : "Copy"}>
+				<Button
+					variant="ghost"
+					size="small"
+					iconOnly
+					aria-label={copied ? "Copied" : "Copy"}
+					className={styles.copy}
+					// Keeps the button shown for the tick, even once the pointer has left the block.
+					data-copied={copied || undefined}
+					onClick={copy}
+				>
+					{/* Each glyph in its own wrapper: the button styles the icons' opacity itself, so the
+					    crossfade has to fade something else. */}
+					<span className={styles.copyIcons}>
+						<span className={classes(styles.copyIcon, copied && styles.copyIconGone)}>
+							<Icon name="copy" />
+						</span>
+						<span className={classes(styles.copyIcon, !copied && styles.copyIconGone)}>
+							<Icon name="tick" />
+						</span>
+					</span>
+				</Button>
+			</Tooltip>
+		</div>
+	);
+};
+
 type MarkdownNode = {
 	type: string;
 	value?: string;
@@ -188,6 +247,7 @@ const remarkLiteralTags = () => {
  * - Images inline only from GitHub-operated hosts (which don't expose
  *   request logs to authors, so they can't track viewers); any other host
  *   renders as a link and is never fetched. See {@link isGitHubHostedImage}.
+ * @import import { Markdown } from "#ui/components/Markdown.tsx";
  */
 export const Markdown: FC<{ children: string }> = ({ children }) => (
 	<div className={classes("text-13", "text-body", styles.markdown)}>
@@ -195,15 +255,21 @@ export const Markdown: FC<{ children: string }> = ({ children }) => (
 			remarkPlugins={[remarkGfm, remarkGemoji, remarkLiteralTags]}
 			rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
 			components={{
-				a: ({ node: _node, children, ...props }) => (
-					// oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- href arrives via the spread; it stays a real anchor.
-					<a {...props} onClick={openExternally}>
-						{children}
-						{isExternalUrl(props.href) && (
-							<Icon name="arrow-up-right" size={12} className={styles.externalIcon} />
-						)}
-					</a>
-				),
+				a: ({ node: _node, children, href, ...props }) =>
+					isExternalUrl(href) ? (
+						<TextLink
+							{...props}
+							href={href}
+							className={styles.externalLink}
+							onClick={openLinkExternally}
+						>
+							{children}
+						</TextLink>
+					) : (
+						<a {...props} href={href}>
+							{children}
+						</a>
+					),
 				code: ({ node: _node, className, children, ...props }) => {
 					const language = fencedLanguage(className);
 					return language !== undefined && typeof children === "string" ? (
@@ -214,6 +280,7 @@ export const Markdown: FC<{ children: string }> = ({ children }) => (
 						</code>
 					);
 				},
+				pre: ({ node, children }) => <Pre node={node}>{children}</Pre>,
 				img: ({ node: _node, src, alt }) => {
 					if (typeof src !== "string" || src === "") return null;
 					const altText = typeof alt === "string" && alt !== "" ? alt : "image";

@@ -1,31 +1,12 @@
-import { classes } from "#ui/components/classes.ts";
-import { Checkbox } from "#ui/components/Checkbox.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { Checkbox } from "@gitbutler/ui-react/Checkbox.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import type { IconName } from "@gitbutler/ui-react/iconNames.ts";
 import { useMergedRefs } from "@base-ui/utils/useMergedRefs";
-import {
-	type ComponentProps,
-	type FC,
-	type MouseEvent,
-	type ReactNode,
-	useLayoutEffect,
-	useRef,
-} from "react";
+import { type ComponentProps, type FC, type ReactNode, useLayoutEffect, useRef } from "react";
 import styles from "./Row.module.css";
+import { getRowButtonClassName, rowPointerProps } from "./Row-utils.ts";
 import { mergeProps, useRender } from "@base-ui/react";
-
-const isFromInteractiveDescendant = (event: MouseEvent<HTMLDivElement>): boolean => {
-	if (!(event.target instanceof Element)) return false;
-	const interactiveElement = event.target.closest(["button", "input[type='checkbox']"].join(","));
-	return interactiveElement !== null && event.currentTarget.contains(interactiveElement);
-};
-
-const isFromNonRowBody = (event: MouseEvent<HTMLDivElement>): boolean => {
-	if (!(event.target instanceof Element)) return false;
-	const interactiveElement = event.target.closest(
-		"a, button, input, select, textarea, [contenteditable]",
-	);
-	return interactiveElement !== null && event.currentTarget.contains(interactiveElement);
-};
 
 export const Row: FC<
 	{
@@ -79,8 +60,6 @@ export const Row: FC<
 	}, [isSelected, scrollSelectedIntoView]);
 
 	return (
-		// This is safe because the tree is focusable.
-		// oxlint-disable-next-line jsx_a11y/click-events-have-key-events, jsx_a11y/no-static-element-interactions
 		<div
 			{...props}
 			ref={mergedRef}
@@ -92,27 +71,7 @@ export const Row: FC<
 				isHighlighted && styles.containerHighlighted,
 				interactive && styles.containerInteractive,
 			)}
-			onMouseDown={(event) => {
-				props.onMouseDown?.(event);
-
-				if (
-					!event.defaultPrevented &&
-					// Prevent clicks on interactive descendants from stealing focus from the tree.
-					isFromInteractiveDescendant(event)
-				)
-					event.preventDefault();
-			}}
-			onClick={(event) => {
-				props.onClick?.(event);
-
-				if (event.defaultPrevented || isFromInteractiveDescendant(event)) return;
-
-				if (event.shiftKey && onShiftSelect && !isFromNonRowBody(event)) onShiftSelect();
-				else onSelect?.();
-			}}
-			onDoubleClick={(event) => {
-				if (!isFromNonRowBody(event)) props.onDoubleClick?.(event);
-			}}
+			{...rowPointerProps({ ...props, onSelect, onShiftSelect })}
 		/>
 	);
 };
@@ -131,14 +90,14 @@ export const RowCheckbox: FC<ComponentProps<typeof Checkbox>> = (props) => (
 
 /**
  * The fold control on a row's graph rail: `glyph` at rest, a chevron once the
- * row is hovered or focused. Both are rendered and the swap is CSS-only (see
- * `.foldToggle`), which blanks just the glyph's own segment so the rail below
- * it keeps drawing. The chevron direction reports the state the way a
+ * row is hovered or focused, or always for section headers. The swap is
+ * CSS-only: hover chevrons replace the glyph, while permanent ones mask only
+ * the line directly behind them. The chevron direction reports the state the way a
  * disclosure triangle does. A glyph that is a chevron itself, as a section
  * header's, turns the hover one off, or the two overlap.
  *
  * `foldedIndicator` marks the rail for as long as the row is folded. The
- * chevron only appears on hover, so it cannot carry that on its own, and
+ * default chevron only appears on hover, so it cannot carry that on its own, and
  * `glyph` is busy describing the row's position in the graph. It takes the
  * second line, leaving the first to the glyph and the chevron.
  */
@@ -147,13 +106,14 @@ export const RowFoldToggle: FC<
 		folded: boolean;
 		glyph: ReactNode;
 		foldedIndicator?: ReactNode;
-		hoverChevron?: boolean;
+		chevron?: "hover" | "always" | "none";
 	} & ComponentProps<"button">
-> = ({ folded, glyph, foldedIndicator, hoverChevron = true, ...props }) => (
+> = ({ folded, glyph, foldedIndicator, chevron = "hover", ...props }) => (
 	<button
 		type="button"
 		{...props}
 		aria-expanded={!folded}
+		data-chevron={chevron}
 		className={classes(props.className, styles.foldToggle)}
 	>
 		<span className={styles.foldGlyph}>{glyph}</span>
@@ -162,12 +122,27 @@ export const RowFoldToggle: FC<
 			<span className={styles.foldIndicator}>{foldedIndicator}</span>
 		)}
 
-		{hoverChevron && (
+		{chevron !== "none" && (
 			<span className={styles.foldChevron}>
 				<Icon size={14} name={folded ? "chevron-right" : "chevron-down"} />
 			</span>
 		)}
 	</button>
+);
+
+/**
+ * A graph rail drawn once down the side of a list, where the rows would
+ * otherwise each draw their own piece of it; the rows start after it.
+ */
+export const RailedList: FC<{ rail: ReactNode } & ComponentProps<"div">> = ({
+	rail,
+	children,
+	...props
+}) => (
+	<div {...props} className={classes(props.className, styles.railedList)}>
+		{rail}
+		{children}
+	</div>
 );
 
 export const RowLabelContainer: FC<ComponentProps<"div">> = (props) => (
@@ -252,12 +227,33 @@ export const RowBubbleGroup: FC<ComponentProps<"span">> = (props) => (
 	<span {...props} className={classes(props.className, styles.bubbleGroup)} />
 );
 
-export const RowToolbar: FC<{ forceVisible?: boolean } & ComponentProps<"div">> = ({
-	forceVisible,
-	...props
-}) => (
+export const RowToolbar: FC<
+	{ forceVisible?: boolean; reserveSpace?: boolean } & ComponentProps<"div">
+> = ({ forceVisible, reserveSpace, ...props }) => (
 	<div
 		{...props}
-		className={classes(props.className, styles.toolbar, forceVisible && styles.toolbarForceVisible)}
+		className={classes(
+			props.className,
+			styles.toolbar,
+			forceVisible && styles.toolbarForceVisible,
+			reserveSpace && styles.toolbarReserveSpace,
+		)}
 	/>
+);
+
+/**
+ * A toolbar button as a row renders it mid-scroll: the same button in the same
+ * place with nothing behind it, so the row keeps its shape and gains no
+ * controls as the list settles.
+ */
+export const PresentationalRowButton: FC<{ icon: IconName }> = ({ icon }) => (
+	<button
+		type="button"
+		inert
+		aria-hidden="true"
+		tabIndex={-1}
+		className={getRowButtonClassName({ iconOnly: true })}
+	>
+		<Icon name={icon} />
+	</button>
 );

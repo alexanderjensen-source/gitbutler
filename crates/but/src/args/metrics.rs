@@ -44,6 +44,7 @@ pub enum CommandName {
     WorktreeArchive,
     WorktreeUnarchive,
     WorktreeRemove,
+    WorktreeNew,
     Switch,
     Config,
     ForgeAuth,
@@ -67,6 +68,7 @@ pub enum CommandName {
     Land,
     Setup,
     Teardown,
+    #[cfg(feature = "nightly")]
     Expand,
     Comment,
     Completions,

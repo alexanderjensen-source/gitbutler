@@ -17,6 +17,10 @@ doctest = false
 
 [features]
 default = ["legacy"]
+## Experimental commands and features, enabled only for nightly releases in CI.
+nightly = []
+## Enable COW worktrees on macOS (Linux provides a test-only mock).
+worktree-cow = ["but-api/worktree-cow"]
 ## A very specific utility flag to make clear that the 'but' binary is managed by a package manager.
 ## When set, the CLI cannot self-manage itself and commands like `but update install` are disabled.
 packaged-but-distribution = []
@@ -144,7 +148,6 @@ machine-uid = "0.5.4"
 tempfile.workspace = true
 nonempty.workspace = true
 itertools.workspace = true
-self_cell.workspace = true
 rand.workspace = true
 ratatui-textarea = "0.8.0"
 arboard = { version = "3.6.1", default-features = false }

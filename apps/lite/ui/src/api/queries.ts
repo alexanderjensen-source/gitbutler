@@ -1,7 +1,7 @@
 import { forgeAuthFailure } from "#ui/forge.ts";
 import type { PayloadFor } from "#electron/ipc.ts";
 import { type AggregateCIChecks, aggregateCIChecks } from "#ui/ci.ts";
-import { clampAutoFetch, defaultSettings } from "#ui/settings.ts";
+import { clampAutoFetch, defaultSettings, parseAutoFetch } from "#ui/settings.ts";
 import type {
 	CiCheck,
 	ForgeName,
@@ -18,7 +18,6 @@ import {
 	queryOptions,
 	skipToken,
 } from "@tanstack/react-query";
-import * as ms from "ms";
 import pMap from "p-map";
 
 /**
@@ -43,6 +42,15 @@ export const branchDiffQueryOptions = ({ projectId, ...params }: PayloadFor<"bra
 	queryOptions({
 		queryKey: [projectId, "branchDiff", params],
 		queryFn: () => window.lite.branchDiff({ projectId, ...params }),
+	});
+
+export const commitRangeDiffQueryOptions = ({
+	projectId,
+	...params
+}: PayloadFor<"commitRangeDiff">) =>
+	queryOptions({
+		queryKey: [projectId, "commitRangeDiff", params],
+		queryFn: () => window.lite.commitRangeDiff({ projectId, ...params }),
 	});
 
 export const branchListQueryOptions = (projectId: string) =>
@@ -209,6 +217,12 @@ export const getReviewQueryOptions = ({ projectId, reviewId }: PayloadFor<"getRe
 		queryFn: () => window.lite.getReview({ projectId, reviewId }),
 	});
 
+export const newReviewTargetQueryOptions = ({ projectId, branch }: PayloadFor<"newReviewTarget">) =>
+	queryOptions({
+		queryKey: [projectId, "newReviewTarget", branch],
+		queryFn: () => window.lite.newReviewTarget({ projectId, branch }),
+	});
+
 export const worktreesListQueryOptions = (projectId: string) =>
 	queryOptions({
 		queryKey: [projectId, "worktreesList"],
@@ -221,6 +235,16 @@ export const workspaceTargetCommitsQueryOptions = (projectId: string) =>
 		queryFn: () => window.lite.workspaceTargetCommits({ projectId, from: null, limit: null }),
 	});
 
+/** The cursor is exclusive. Sharing the listing's key prefix also shares its invalidation. */
+export const olderTargetCommitsInfiniteQueryOptions = (projectId: string, from: string) =>
+	infiniteQueryOptions({
+		queryKey: [projectId, "workspaceTargetCommits", { olderThan: from }],
+		queryFn: ({ pageParam }) =>
+			window.lite.workspaceTargetCommits({ projectId, from: pageParam, limit: 25 }),
+		initialPageParam: from,
+		getNextPageParam: (page) => (page.hasMore ? page.commits.at(-1)?.commit.id : undefined),
+	});
+
 export const workspaceFetchStatusQueryOptions = (projectId: string) =>
 	queryOptions({
 		queryKey: [projectId, "workspaceFetchStatus"],
@@ -231,13 +255,7 @@ export const workspaceFetchQueryOptions = (
 	projectId: string,
 	autoFetchFrequency = defaultSettings.autoFetchFrequency,
 ) => {
-	// Throws on empty and large strings.
-	let autoFetchFrequencyMs: number;
-	try {
-		autoFetchFrequencyMs = ms.parse(autoFetchFrequency);
-	} catch {
-		autoFetchFrequencyMs = Number.NaN;
-	}
+	const autoFetchFrequencyMs = parseAutoFetch(autoFetchFrequency);
 
 	return queryOptions({
 		queryKey: [projectId, "workspaceFetchFromRemotes"],
@@ -606,9 +624,15 @@ export const listCIChecksQueryOptions = ({
 		},
 	});
 
+// This matches but_core::unified_diff::filter_from_state: only a null destination
+// object ID reads file content (and attributes) from disk rather than Git.
+const readsWorktree = ({ status }: TreeChange): boolean =>
+	status.type !== "Deletion" && /^0+$/.test(status.subject.state.id);
+
 export const treeChangeDiffsQueryOptions = ({ projectId, change }: PayloadFor<"treeChangeDiffs">) =>
 	queryOptions({
 		queryKey: [projectId, "treeChangeDiffs", change],
+		meta: { readsWorktree: readsWorktree(change) },
 		queryFn: () => window.lite.treeChangeDiffs({ projectId, change }),
 	});
 
@@ -623,7 +647,10 @@ export const treeChangeDiffsQueryOptions = ({ projectId, change }: PayloadFor<"t
  * scope it was computed for, so an array reused under another project or worktree, as a shared
  * empty one is, hashes again rather than colliding.
  */
-const treeChangeDiffHashes = new WeakMap<Array<TreeChange>, { scope: string; hash: string }>();
+const treeChangeDiffHashes = new WeakMap<
+	Array<TreeChange>,
+	{ scope: string; hash: string; readsWorktree: boolean }
+>();
 
 export const treeChangesDiffsQueryOptions = ({
 	projectId,
@@ -638,16 +665,16 @@ export const treeChangesDiffsQueryOptions = ({
 	const queryKey = [projectId, "treeChangeDiffs", worktree, changes] as const;
 
 	const scope = `${projectId}:${worktree ?? ""}`;
-	const cached = treeChangeDiffHashes.get(changes);
-	let queryHash = cached?.scope === scope ? cached.hash : undefined;
-	if (queryHash === undefined) {
-		queryHash = hashKey(queryKey);
-		treeChangeDiffHashes.set(changes, { scope, hash: queryHash });
+	let cached = treeChangeDiffHashes.get(changes);
+	if (cached?.scope !== scope) {
+		cached = { scope, hash: hashKey(queryKey), readsWorktree: changes.some(readsWorktree) };
+		treeChangeDiffHashes.set(changes, cached);
 	}
 
 	return queryOptions({
 		queryKey,
-		queryHash,
+		queryHash: cached.hash,
+		meta: { readsWorktree: cached.readsWorktree },
 		queryFn: experimental_streamedQuery<Array<UnifiedPatch | null>, Array<UnifiedPatch | null>>({
 			initialValue: [],
 			refetchMode: "replace",
@@ -696,4 +723,14 @@ export const guiSettingsQueryOptions = queryOptions({
 export const appSettingsQueryOptions = queryOptions({
 	queryKey: ["appSettings"],
 	queryFn: () => window.lite.getAppSettings(),
+});
+
+export const versionQueryOptions = queryOptions({
+	queryKey: ["version"],
+	queryFn: () => window.lite.getVersion(),
+});
+
+export const isPackagedQueryOptions = queryOptions({
+	queryKey: ["isPackaged"],
+	queryFn: () => window.lite.isPackaged(),
 });

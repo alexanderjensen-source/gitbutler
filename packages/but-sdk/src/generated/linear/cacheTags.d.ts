@@ -13,6 +13,7 @@ export declare const apiProvides: {
 	readonly commentsList: readonly ["Comments"];
 	readonly commitConflicts: readonly [];
 	readonly commitDetailsWithLineStats: readonly ["Commits"];
+	readonly commitRangeDiff: readonly ["Commits"];
 	readonly currentForgeLogin: readonly ["ForgeLogin"];
 	readonly editChangesFromInitial: readonly ["WorktreeChanges"];
 	readonly editInitialIndexState: readonly ["OperatingMode"];
@@ -37,6 +38,7 @@ export declare const apiProvides: {
 	readonly listReviewerCandidates: readonly ["ReviewerCandidates"];
 	readonly listReviews: readonly ["Reviews"];
 	readonly listSnapshots: readonly ["Workspace"];
+	readonly newReviewTarget: readonly ["Workspace", "Reviews"];
 	readonly operatingMode: readonly ["OperatingMode"];
 	readonly treeChangeDiffs: readonly ["Diffs"];
 	readonly treeChangeDiffsFromSource: readonly ["Diffs"];
@@ -86,6 +88,7 @@ export declare const apiInvalidates: {
 	readonly updateReviewComment: readonly ["ReviewComments"];
 	readonly withdrawReviewRequest: readonly ["Reviews"];
 	readonly workspaceBranchAndAncestorsPush: readonly ["Workspace", "Reviews", "MergeStatus", "Checks", "ReviewTimeline"];
+	readonly worktreeNew: readonly ["Worktrees", "Workspace"];
 	readonly worktreeRemove: readonly ["Worktrees", "Workspace"];
 	readonly worktreeSetArchived: readonly ["Worktrees", "Workspace"];
 };

@@ -1,3 +1,4 @@
+import { useMergeReadiness } from "#ui/pr.ts";
 import {
 	type PushBeforePublish,
 	useAddReviewReaction,
@@ -15,7 +16,6 @@ import {
 	branchDetailsQueryOptions,
 	currentForgeLoginQueryOptions,
 	forgeInfoOptions,
-	getReviewMergeStatusQueryOptions,
 	listReviewReactionsQueryOptions,
 	listReviewTimelineEventsQueryOptions,
 } from "#ui/api/queries.ts";
@@ -23,20 +23,20 @@ import {
 	Reactions,
 	tallyReactions,
 } from "#ui/routes/project/$id/workspace/PullRequestReactions.tsx";
-import { getButtonClassName } from "#ui/components/Button.tsx";
+import { Button } from "@gitbutler/ui-react/Button.tsx";
 import { Clamped } from "#ui/components/Clamped.tsx";
-import { classes } from "#ui/components/classes.ts";
-import { DropdownButton } from "#ui/components/DropdownButton.tsx";
-import { FieldControlStyles, FieldRootStyles } from "#ui/components/Field.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { DropdownButton } from "@gitbutler/ui-react/DropdownButton.tsx";
+import { FieldControlStyles, FieldRootStyles } from "@gitbutler/ui-react/Field.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
 import { Markdown } from "#ui/components/Markdown.tsx";
 import { ReviewUser } from "#ui/routes/project/$id/workspace/PullRequestPanel.tsx";
-import { formatAbsoluteTime, formatRelativeTime } from "#ui/time.ts";
+import { formatAbsoluteTime, formatRelativeTime } from "@gitbutler/ui-react/time.ts";
 import { branchDetailsParams } from "#ui/branch.ts";
 import { MarkdownAttachments } from "#ui/components/MarkdownAttachments.tsx";
-import { MarkdownToolbar } from "#ui/components/MarkdownToolbar.tsx";
-import { SwitchButton } from "#ui/components/SwitchButton.tsx";
-import { TooltipPopup } from "#ui/components/Tooltip.tsx";
+import { MarkdownToolbar } from "@gitbutler/ui-react/MarkdownToolbar.tsx";
+import { SwitchButton } from "@gitbutler/ui-react/SwitchButton.tsx";
+import { Tooltip } from "@gitbutler/ui-react/Tooltip.tsx";
 import { pullRequestHotkeys } from "#ui/hotkeys.ts";
 import { prDescriptionGenerationButtonState } from "#ui/pr-description-generation.ts";
 import { projectAiSettingsQueryOptions } from "#ui/project-ai-settings.ts";
@@ -53,8 +53,8 @@ import {
 	usePersistMergeMethod,
 } from "#ui/pr.ts";
 import { type FocusScope, useAutofocusScope } from "#ui/focus-scopes.ts";
-import { Button, Field, Tooltip } from "@base-ui/react";
-import type { ForgeReview, ReviewMergeMethod, ReviewMergeStatus } from "@gitbutler/but-sdk";
+import { Field } from "@base-ui/react";
+import type { ForgeReview, ReviewMergeMethod } from "@gitbutler/but-sdk";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useHotkey } from "@tanstack/react-hotkeys";
 import { useMergedRefs } from "@base-ui/utils/useMergedRefs";
@@ -431,27 +431,18 @@ export const PullRequestForm: FC<{
 								targetRef={bodyRef}
 							/>
 							<div aria-hidden className={styles.footerSeparator} />
-							<Tooltip.Root>
-								{/* Disabled buttons swallow hover, so the wrapper span carries the tooltip. */}
-								<Tooltip.Trigger render={<span className={styles.disabledActionWrap} />}>
-									<button
-										aria-label="Generate title and description"
-										className={getButtonClassName({ variant: "ghost", iconOnly: true })}
-										disabled={generationButton.disabled}
-										onClick={generateDescription}
-										type="button"
-									>
-										<Icon name={isGenerating ? "spinner" : "ai-text"} />
-									</button>
-								</Tooltip.Trigger>
-								<Tooltip.Portal>
-									<Tooltip.Positioner sideOffset={4}>
-										<Tooltip.Popup render={<TooltipPopup />}>
-											{generationButton.hint ?? "Generate title and description"}
-										</Tooltip.Popup>
-									</Tooltip.Positioner>
-								</Tooltip.Portal>
-							</Tooltip.Root>
+							<Tooltip content={generationButton.hint ?? "Generate title and description"}>
+								<Button
+									aria-label="Generate title and description"
+									variant="ghost"
+									iconOnly
+									focusableWhenDisabled
+									disabled={generationButton.disabled}
+									onClick={generateDescription}
+								>
+									<Icon name={isGenerating ? "spinner" : "ai-text"} />
+								</Button>
+							</Tooltip>
 						</div>
 
 						<div className={styles.footerEnd}>
@@ -473,34 +464,28 @@ export const PullRequestForm: FC<{
 								    already drops the persisted draft on blur, so a Reset button
 								    would just be a destructive shortcut for that. */}
 								{onCancel !== undefined && (
-									<button
-										className={getButtonClassName({})}
+									<Button
 										disabled={isAnyPending}
 										onClick={() => {
 											handleReset();
 											onCancel();
 										}}
-										type="button"
 									>
 										Cancel
-									</button>
+									</Button>
 								)}
 
 								{/* The reason rides in the label, not a tooltip: it is the
 								    form's whole story, so it has to be readable without hover
-								    (DESIGN.md → Empty states). Only once the editor is too
+								    (ui-react's design/patterns/blocked-states.md). Only once the editor is too
 								    narrow for the label does the tooltip take it over. */}
-								<Tooltip.Root disabled={!submitLabelHidden || !isNew}>
-									<Tooltip.Trigger
+								<Tooltip disabled={!submitLabelHidden || !isNew} content={submitLabel}>
+									<Button
+										variant="gray"
+										disabled={!canSubmit || noCommits || isAnyPending || !hasChanges}
+										focusableWhenDisabled
+										type="submit"
 										aria-label={submitLabel}
-										className={getButtonClassName({ variant: "gray" })}
-										render={
-											<Button
-												disabled={!canSubmit || noCommits || isAnyPending || !hasChanges}
-												focusableWhenDisabled
-												type="submit"
-											/>
-										}
 									>
 										<span ref={observeSubmitLabel} className={styles.submitLabel}>
 											{submitLabel}
@@ -514,13 +499,8 @@ export const PullRequestForm: FC<{
 										{isNew && pushFirst !== null && !noCommits && (
 											<Icon name="arrow-up" className={styles.submitPushIcon} />
 										)}
-									</Tooltip.Trigger>
-									<Tooltip.Portal>
-										<Tooltip.Positioner sideOffset={4}>
-											<Tooltip.Popup render={<TooltipPopup />}>{submitLabel}</Tooltip.Popup>
-										</Tooltip.Positioner>
-									</Tooltip.Portal>
-								</Tooltip.Root>
+									</Button>
+								</Tooltip>
 							</div>
 						</div>
 					</div>
@@ -689,29 +669,6 @@ export const PullRequestDescription: FC<{
 	);
 };
 
-/** Why the Merge button is disabled, or null when merging is possible. */
-const mergeBlockedReason = (mergeStatus: ReviewMergeStatus | undefined): string | null => {
-	if (mergeStatus === undefined) return "Checking mergeability…";
-	if (mergeStatus.isMergeable) return null;
-
-	switch (mergeStatus.mergeableState) {
-		case "blocked":
-			return "Blocked: required approvals or checks are not satisfied";
-		case "behind":
-			return "Behind the base branch; update the branch first";
-		case "dirty":
-			return "Merge conflicts with the base branch";
-		case "draft":
-			return "Draft pull requests cannot be merged";
-		case "unknown":
-		case "checking":
-		case null:
-			return "Mergeability not yet determined by the forge";
-		default:
-			return `Not mergeable (state: ${mergeStatus.mergeableState})`;
-	}
-};
-
 /** The choice persists per project (see mergeMethodQueryOptions). */
 const mergeMethods = [
 	"merge",
@@ -742,11 +699,7 @@ export const PullRequestPrimaryAction: FC<{
 	const isMerged = review.mergedAt !== null;
 	const isClosed = !isMerged && review.closedAt !== null;
 
-	const { data: mergeStatus } = useQuery({
-		...getReviewMergeStatusQueryOptions({ projectId, reviewId }),
-		// Minimise API calls.
-		enabled: !isDraft,
-	});
+	const readiness = useMergeReadiness(projectId, review);
 	const { data: storedMergeMethod } = useQuery(mergeMethodQueryOptions(projectId));
 	const mergeMethod = storedMergeMethod ?? "merge";
 	const { mutate: persistMergeMethod } = usePersistMergeMethod();
@@ -764,7 +717,7 @@ export const PullRequestPrimaryAction: FC<{
 		isSetReviewDraftinessPending ||
 		isSetReviewAutoMergePending;
 
-	const blockedReason = mergeBlockedReason(mergeStatus);
+	const blockedReason = readiness.blocker;
 
 	// A merged review can be neither drafted nor reopened, so its menu is the
 	// browser link alone; `nativeMenuItemsFromGroups` would otherwise trail a
@@ -809,15 +762,10 @@ export const PullRequestPrimaryAction: FC<{
 	return (
 		<div className={styles.prActions}>
 			{/* One-way: the form's own Cancel and Save leave edit mode. */}
-			<button
-				className={getButtonClassName({ variant: "ghost" })}
-				disabled={isAnyPending || isEditing}
-				onClick={onStartEdit}
-				type="button"
-			>
+			<Button variant="ghost" disabled={isAnyPending || isEditing} onClick={onStartEdit}>
 				Edit
 				<Icon name="edit" />
-			</button>
+			</Button>
 
 			{!isDraft && (
 				<>
@@ -858,19 +806,19 @@ export const PullRequestPrimaryAction: FC<{
 				</>
 			)}
 
-			<button
+			<Button
 				aria-label="More pull request actions"
-				className={getButtonClassName({ variant: "ghost", iconOnly: true })}
+				variant="ghost"
+				iconOnly
 				disabled={isAnyPending}
 				onClick={(evt) => void showNativeMenuFromTrigger(evt.currentTarget, menuItems)}
-				type="button"
 			>
 				{isUpdateReviewPending || isSetReviewDraftinessPending ? (
 					<Icon name="spinner" />
 				) : (
 					<Icon name="kebab" />
 				)}
-			</button>
+			</Button>
 		</div>
 	);
 };

@@ -248,6 +248,17 @@ pub(crate) fn enter_edit_mode(
 
     ensure_stack_in_workspace(ctx, stack_id)?;
 
+    // Fail before writing anything if the index is already locked, as checkout would only
+    // notice after refs and HEAD were moved. The probe is released so checkout can take it.
+    drop(
+        gix::lock::File::acquire_to_update_resource_following_symlinks(
+            repo.index_path(),
+            gix::lock::acquire::Fail::Immediately,
+            None,
+        )
+        .context("Repository index is locked by another process")?,
+    );
+
     commit_uncommited_changes(repo)?;
     write_edit_mode_metadata(ctx, &edit_mode_metadata).context("Failed to persist metadata")?;
     checkout_edit_branch(ctx, commit_oid).context("Failed to checkout edit branch")?;
@@ -312,7 +323,9 @@ pub(crate) fn save_and_return_to_workspace(ctx: &Context, perm: &mut RepoExclusi
     #[allow(deprecated)]
     let old_workspace_projection = workspace_from_workspace_ref(ctx)?;
     let old_target_base_oid = old_workspace_projection
-        .stored_target_commit_id()
+        .target_commit
+        .as_ref()
+        .map(|target| target.commit_id)
         .context("failed to get target base oid")?;
     let old_head_oids = old_workspace_projection
         .stacks

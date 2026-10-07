@@ -161,12 +161,366 @@ fn single_branch_pull_leaves_a_diverged_local_target_branch_unchanged() {
 }
 
 #[test]
-fn single_branch_pull_replaces_a_fully_integrated_checkout() {
+fn single_branch_pull_preserves_main_after_pushing_it() {
+    let env = single_branch_integration_scenario();
+    let remote = env.app_data_dir().join("origin.git");
+    let remote_arg = shell_words::quote(&remote.display().to_string()).into_owned();
+    env.invoke_bash(format!(
+        "git clone -q --bare . {remote_arg} && git remote set-url origin {remote_arg}"
+    ));
+    env.invoke_git("branch --set-upstream-to=origin/main main");
+    env.invoke_git("commit --allow-empty -m 'on main'");
+
+    env.but("push").assert().success();
+    // Pushing advances origin/main and preserves the local checkout.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 1eef6fe (HEAD -> main, origin/main, origin/HEAD) on main
+* 85efbe4 M
+
+"#]]
+    );
+
+    // Ideally we wouldn't show main as merged but with the hint telling you to pull its fine
+    env.but("status").assert().success().stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ ma [main] [HEAD] (merged upstream)
+┊●   sxu on main (no changes)
+├╯
+┊
+┊● 1eef6fe (upstream: origin/main) 1 new commit
+├╯ 85efbe4 (common base) 2000-01-02 M
+
+Hint: origin/main moved ahead; run `but pull` to update the workspace
+Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
+
+"#]]);
+
+    env.but("pull").assert().success();
+
+    // Integrating the pushed commits must preserve main and keep it checked out.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 1eef6fe (HEAD -> main, origin/main, origin/HEAD, gitbutler/target) on main
+* 85efbe4 M
+
+"#]]
+    );
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┴ 1eef6fe (common base, main, origin/main, HEAD) 2000-01-02 on main
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+}
+
+#[test]
+fn single_branch_pull_preserves_develop_after_pushing_it() {
+    let env = single_branch_integration_scenario();
+    env.invoke_git("branch -m main develop");
+    let remote = env.app_data_dir().join("origin.git");
+    let remote_arg = shell_words::quote(&remote.display().to_string()).into_owned();
+    env.invoke_bash(format!(
+        "git clone -q --bare . {remote_arg} && git remote set-url origin {remote_arg}"
+    ));
+    env.invoke_git(
+        "config --replace-all remote.origin.fetch +refs/heads/develop:refs/remotes/origin/develop",
+    );
+    env.invoke_git("fetch origin");
+    env.invoke_git("symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop");
+    env.invoke_git("update-ref -d refs/remotes/origin/main");
+    env.invoke_git("branch --set-upstream-to=origin/develop develop");
+    let mut project_meta = env.project_meta();
+    project_meta.target_ref = Some("refs/remotes/origin/develop".try_into().unwrap());
+    project_meta.persist(&env.open_repo()).unwrap();
+
+    env.invoke_git("commit --allow-empty -m 'on develop'");
+    env.but("push").assert().success();
+    // A differently named integration branch must behave just like main.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 0a170f9 (HEAD -> develop, origin/develop, origin/HEAD) on develop
+* 85efbe4 M
+
+"#]]
+    );
+
+    env.but("pull").assert().success();
+    // Pull must preserve the configured integration branch and its checkout.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 0a170f9 (HEAD -> develop, origin/develop, origin/HEAD, gitbutler/target) on develop
+* 85efbe4 M
+
+"#]]
+    );
+}
+
+#[test]
+fn single_branch_pull_preserves_integrated_develop_below_feature() {
+    let env = single_branch_integration_scenario();
+    env.invoke_git("branch -m main develop");
+    let remote = env.app_data_dir().join("origin.git");
+    let remote_arg = shell_words::quote(&remote.display().to_string()).into_owned();
+    env.invoke_bash(format!(
+        "git clone -q --bare . {remote_arg} && git remote set-url origin {remote_arg}"
+    ));
+    env.invoke_git(
+        "config --replace-all remote.origin.fetch +refs/heads/develop:refs/remotes/origin/develop",
+    );
+    env.invoke_git("fetch origin");
+    env.invoke_git("symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop");
+    env.invoke_git("update-ref -d refs/remotes/origin/main");
+    env.invoke_git("branch --set-upstream-to=origin/develop develop");
+    let mut project_meta = env.project_meta();
+    project_meta.target_ref = Some("refs/remotes/origin/develop".try_into().unwrap());
+    project_meta.persist(&env.open_repo()).unwrap();
+
+    env.invoke_git("commit --allow-empty -m 'on develop'");
+    env.but("commit -b feature --above develop -m 'on feature'")
+        .assert()
+        .success();
+    env.but("switch develop").assert().success();
+    env.but("push").assert().success();
+    env.but("switch feature").assert().success();
+    // Develop is integrated, but feature still has its own work above the target.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 1a76327 (HEAD -> feature) on feature
+* 0a170f9 (origin/develop, origin/HEAD, develop) on develop
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("pull").assert().success();
+    // Deleting ordinary integrated refs must not delete the local integration branch.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 1a76327 (HEAD -> feature) on feature
+* 0a170f9 (origin/develop, origin/HEAD, develop) on develop
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+}
+
+#[test]
+fn undo_and_redo_restore_checkout_after_integrated_feature_switches_to_main() {
+    let env = single_branch_integration_scenario();
+    env.invoke_git("branch --set-upstream-to=origin/main main");
+    env.but("branch new A").assert().success();
+    commit_file(&env, "A");
+    merge_into_upstream(&env, "A", true);
+    env.but("pull").assert().success();
+
+    env.but("undo").assert().success();
+    // Undo restores the integrated feature and its checkout, without moving main.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (origin/main, origin/HEAD, main) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 (HEAD -> A) add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("redo").assert().success();
+    // Redo restores the checkout of the existing target branch, not a generated branch.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (HEAD -> main, origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+}
+
+#[test]
+fn single_branch_pull_checks_out_main_after_fast_forwarding_it() {
+    let env = single_branch_integration_scenario();
+    env.invoke_git("branch --set-upstream-to=origin/main main");
+    let old_main = rev_parse(&env, "main");
+    env.but("branch new A").assert().success();
+    commit_file(&env, "A");
+    merge_into_upstream(&env, "A", true);
+
+    // Keep the merged history only in the remote. Pull must fetch it while local main
+    // and its remote-tracking ref still point at the pre-merge base.
+    let remote = env.app_data_dir().join("origin.git");
+    let remote_arg = shell_words::quote(&remote.display().to_string()).into_owned();
+    env.invoke_bash(format!(
+        "git clone -q --bare . {remote_arg} && git remote set-url origin {remote_arg}"
+    ));
+    env.invoke_git(&format!("update-ref refs/heads/main {old_main}"));
+    env.invoke_git(&format!("update-ref refs/remotes/origin/main {old_main}"));
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 2bc0e49 (HEAD -> A) add A
+* 85efbe4 (origin/main, origin/HEAD, main, gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("pull --check").assert().success();
+    // Fetching during a preview must not advance local main or change the checkout.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 (HEAD -> A) add A
+|/  
+* 85efbe4 (main, gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("pull").assert().success();
+
+    // The fast-forwardable local target should become the checkout, not a canned branch.
+    env.but("status")
+        .env("NO_BG_TASKS", "1")
+        .assert()
+        .success()
+        .stderr_eq(str![])
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┴ 5aa8cbc (common base, main, origin/main, HEAD) 2000-01-02 add upstream
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (HEAD -> main, origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("undo").assert().success();
+    // Undo restores both main's old tip and the deleted feature checkout.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 (HEAD -> A) add A
+|/  
+* 85efbe4 (main, gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("redo").assert().success();
+    // Redo fast-forwards main and restores its checkout together.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (HEAD -> main, origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+}
+
+#[test]
+fn single_branch_pull_checks_out_main_when_feature_is_fully_integrated() {
+    let env = single_branch_integration_scenario();
+    env.invoke_git("branch --set-upstream-to=origin/main main");
+    env.but("branch new A").assert().success();
+    commit_file(&env, "A");
+    merge_into_upstream(&env, "A", true);
+
+    // The feature is integrated, and main is already at the updated target tip.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (origin/main, origin/HEAD, main) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 (HEAD -> A) add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+
+    env.but("pull").assert().success();
+
+    // Reuse main instead of creating an empty replacement branch for the removed feature.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        str![[r#"
+* 5aa8cbc (HEAD -> main, origin/main, origin/HEAD) add upstream
+*   7608f76 merge A
+|/  
+| * 2bc0e49 add A
+|/  
+* 85efbe4 (gitbutler/target) M
+
+"#]]
+    );
+    env.but("status")
+        .env("NO_BG_TASKS", "1")
+        .assert()
+        .success()
+        .stderr_eq(str![])
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┴ 5aa8cbc (common base, main, origin/main, HEAD) 2000-01-02 add upstream
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+}
+
+#[test]
+fn single_branch_pull_replaces_integrated_checkout_when_main_is_in_another_worktree() {
     let env = single_branch_integration_scenario();
     env.but("branch new A").assert().success();
     commit_file(&env, "A");
     let old_head = rev_parse(&env, "A");
     merge_into_upstream(&env, "A", true);
+    let worktree = env.app_data_dir().join("linked-main");
+    let worktree_arg = shell_words::quote(&worktree.display().to_string()).into_owned();
+    env.invoke_git(&format!("worktree add -q {worktree_arg} main"));
 
     env.but("status")
         .env("NO_BG_TASKS", "1")
@@ -176,7 +530,7 @@ fn single_branch_pull_replaces_a_fully_integrated_checkout() {
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A] (merged upstream)
+┊╭┄ g0 [A] [HEAD] (merged upstream)
 ┊●   tyt add A
 ├╯
 ┊
@@ -226,10 +580,10 @@ Run `but pull` to update your branches
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ br [a-branch-1] (no commits)
+┊╭┄ br [a-branch-1] [HEAD] (no commits)
 ├╯
 ┊
-┴ 5aa8cbc (common base) 2000-01-02 add upstream
+┴ 5aa8cbc (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but help` for all commands
 
@@ -252,6 +606,64 @@ Hint: run `but help` for all commands
 }
 
 #[test]
+fn single_branch_pull_allows_restoring_workspace_after_integrated_branch_is_removed() {
+    let env = single_branch_integration_scenario();
+    env.but("branch new A").assert().success();
+    commit_file(&env, "A");
+
+    // Remember A as applied in a managed workspace, then return to single-branch mode.
+    env.but("switch --workspace").assert().success();
+    env.but("switch A").assert().success();
+    assert!(
+        git_ref_exists(&env, but_core::WORKSPACE_REF_NAME),
+        "the saved workspace must exist before integrating its branch"
+    );
+
+    merge_into_upstream(&env, "A", false);
+    env.but("pull").assert().success();
+    assert!(
+        !git_ref_exists(&env, "refs/heads/A"),
+        "pull must remove the integrated branch while outside the saved workspace"
+    );
+
+    env.but("switch main").assert().success();
+    env.but("status")
+        .assert()
+        .success()
+        .stderr_eq(str![])
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┴ 7608f76 (common base, main, origin/main, HEAD) 2000-01-02 merge A
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+
+    // Restoring the saved workspace must not attempt to reapply the deleted branch.
+    env.but("switch --workspace")
+        .assert()
+        .success()
+        .stderr_eq(str![])
+        .stdout_eq(str![[r#"
+Switched to workspace
+
+"#]]);
+    env.but("status")
+        .assert()
+        .success()
+        .stderr_eq(str![])
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┴ 7608f76 (common base, main, origin/main) 2000-01-02 merge A
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+}
+
+#[test]
 fn single_branch_pull_prunes_an_integrated_lower_branch() {
     let env = single_branch_integration_scenario();
     env.but("branch new C").assert().success();
@@ -270,7 +682,7 @@ fn single_branch_pull_prunes_an_integrated_lower_branch() {
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   uxq add A
 ┊│
 ┊├┄ h0 [C] (merged upstream)
@@ -317,11 +729,11 @@ Run `but pull` to update your branches
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   uxq add A
 ├╯
 ┊
-┴ dba3edc (common base) 2000-01-02 add upstream
+┴ dba3edc (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but help` for all commands
 
@@ -360,7 +772,7 @@ fn single_branch_pull_keeps_an_empty_branch_above_an_integrated_branch() {
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ to [top] (no commits)
+┊╭┄ to [top] [HEAD] (no commits)
 ┊│
 ┊├┄ bo [bottom] (merged upstream)
 ┊●   lwy add bottom
@@ -409,10 +821,10 @@ Run `but pull` to update your branches
         .stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ to [top] (no commits)
+┊╭┄ to [top] [HEAD] (no commits)
 ├╯
 ┊
-┴ 3ea7b57 (common base) 2000-01-02 merge bottom
+┴ 3ea7b57 (common base, main, origin/main) 2000-01-02 merge bottom
 
 Hint: run `but help` for all commands
 
@@ -468,7 +880,7 @@ fn pull_prunes_integrated_stack_and_keeps_remaining_stack_parent() {
 ├╯
 ┊
 ┊● 26ecc90 (upstream: origin/main) 2 new commits
-├╯ 26ecc90 (common base) 2000-01-02 add upstream
+├╯ 26ecc90 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 
@@ -483,7 +895,7 @@ Hint: origin/main moved ahead; run `but pull` to update the workspace
 ┊◐   lrm add B
 ├╯
 ┊
-┴ 26ecc90 (common base) 2000-01-02 add upstream
+┴ 26ecc90 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but help` for all commands
 
@@ -555,7 +967,7 @@ Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove 
 ┊◐   ozt add A
 ├╯
 ┊
-┴ d4cb681 (common base) 2000-01-02 add upstream
+┴ d4cb681 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but help` for all commands
 
@@ -727,7 +1139,7 @@ Hint: origin/main moved ahead; run `but pull` to update the workspace
 ┊◐   nyo A-change (no changes) {conflicted}
 ├╯
 ┊
-┴ bdfcf28 (common base) 2000-01-02 main-change
+┴ bdfcf28 (common base, main, origin/main) 2000-01-02 main-change
 
 Hint: run `but help` for all commands
 
@@ -749,7 +1161,7 @@ fn pull_checks_out_canned_branch_after_all_stacks_integrate() {
 ├╯
 ┊
 ┊● 7e5d4e1 (upstream: origin/main) 3 new commits
-├╯ 7e5d4e1 (common base) 2000-01-02 add upstream
+├╯ 7e5d4e1 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 
@@ -760,10 +1172,10 @@ Hint: origin/main moved ahead; run `but pull` to update the workspace
     env.but("status").assert().success().stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ br [a-branch-1] (no commits)
+┊╭┄ br [a-branch-1] [HEAD] (no commits)
 ├╯
 ┊
-┴ 7e5d4e1 (common base) 2000-01-02 add upstream
+┴ 7e5d4e1 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but help` for all commands
 
@@ -798,7 +1210,7 @@ fn pull_keeps_empty_workspace_after_all_stacks_integrate_outside_single_branch_m
     env.but("status").assert().success().stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┴ 7e5d4e1 (common base) 2000-01-02 add upstream
+┴ 7e5d4e1 (common base, main, origin/main) 2000-01-02 add upstream
 
 Hint: run `but branch new` to create a new branch to work on
 
@@ -832,7 +1244,7 @@ fn pull_reparents_empty_workspace_when_target_advances() {
     env.but("status").assert().success().stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┴ 0dc3733 (common base) 2000-01-02 add M
+┴ 0dc3733 (common base, origin/main) 2000-01-02 add M
 
 Hint: run `but branch new` to create a new branch to work on
 
@@ -843,7 +1255,7 @@ Hint: run `but branch new` to create a new branch to work on
     env.but("status").assert().success().stdout_eq(str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┴ 526bb83 (common base) 2000-01-02 upstream-change
+┴ 526bb83 (common base, main, origin/main) 2000-01-02 upstream-change
 
 Hint: run `but branch new` to create a new branch to work on
 
@@ -874,7 +1286,7 @@ fn pull_does_not_report_branch_rebase_conflicts_as_worktree_conflicts() {
 ├╯
 ┊
 ┊● 247c151 (upstream: origin/main) 1 new commit
-├╯ 247c151 (common base) 2000-01-02 upstream change
+├╯ 247c151 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: run `but diff` to see uncommitted changes and `but commit -b <branch> -m "message" <id>` to commit them
@@ -910,7 +1322,7 @@ Hint: run `but diff` to see uncommitted changes and `but commit -b <branch> -m "
 ┊◐   vxp local change (no changes) {conflicted}
 ├╯
 ┊
-┴ 247c151 (common base) 2000-01-02 upstream change
+┴ 247c151 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: run `but diff` to see uncommitted changes and `but commit -b <branch> -m "message" <id>` to commit them
 
@@ -932,7 +1344,7 @@ fn pull_json_reports_branch_rebase_conflicts_as_successful_integration() {
 ├╯
 ┊
 ┊● 247c151 (upstream: origin/main) 1 new commit
-├╯ 247c151 (common base) 2000-01-02 upstream change
+├╯ 247c151 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 
@@ -972,7 +1384,7 @@ Hint: origin/main moved ahead; run `but pull` to update the workspace
 ┊◐   vxp local change (no changes) {conflicted}
 ├╯
 ┊
-┴ 247c151 (common base) 2000-01-02 upstream change
+┴ 247c151 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: run `but help` for all commands
 
@@ -997,7 +1409,7 @@ fn pull_reports_conflict_in_lower_branch_of_stack() {
 ├╯
 ┊
 ┊● 7f73771 (upstream: origin/main) 1 new commit
-├╯ 7f73771 (common base) 2000-01-02 upstream change
+├╯ 7f73771 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 
@@ -1038,7 +1450,7 @@ To undo this operation:
 ┊◐   rou bottom change (no changes) {conflicted}
 ├╯
 ┊
-┴ 7f73771 (common base) 2000-01-02 upstream change
+┴ 7f73771 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: run `but help` for all commands
 
@@ -1063,7 +1475,7 @@ fn pull_reports_conflicts_in_multiple_branches_of_stack() {
 ├╯
 ┊
 ┊● e4933d8 (upstream: origin/main) 1 new commit
-├╯ [..] (common base) 2000-01-02 upstream change
+├╯ e4933d8 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: origin/main moved ahead; run `but pull` to update the workspace
 
@@ -1106,7 +1518,7 @@ To undo this operation:
 ┊◐   trk bottom change (no changes) {conflicted}
 ├╯
 ┊
-┴ e4933d8 (common base) 2000-01-02 upstream change
+┴ e4933d8 (common base, main, origin/main) 2000-01-02 upstream change
 
 Hint: run `but help` for all commands
 
@@ -1177,7 +1589,7 @@ To undo this operation:
 ┊◐   zyx add A
 ├╯
 ┊
-┴ 7f73771 (common base) 2000-01-02 upstream change
+┴ 7f73771 (common base, main, origin/main) 2000-01-02 upstream change
 ⚠ Uncommitted file conflicts: edit each file to the wanted contents (or delete it), then run `but resolve <path>...` to mark it resolved.
 
 Hint: run `but help` for all commands

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bstr::BStr;
 
 use crate::{
-    CliId, CliResult,
+    ChangeSourceId, CliId, CliResult,
     args::atoms::ResolvedCliIdArg,
     bad_input,
     command::legacy::status::{
@@ -20,10 +20,11 @@ use crate::{
             render::{
                 branch_operation_display, cherry_pick_operation_display, commit_operation_display,
                 move_operation_display, reorder_operation_display, stack_operation_display,
+                worktree_operation_display,
             },
         },
     },
-    id::{CommitId, CommittedFileId},
+    id::{CommitId, CommittedFileId, LaneId},
 };
 
 #[cfg(test)]
@@ -41,6 +42,16 @@ impl Cursor {
                 .position(|line| line.is_selectable())
                 .unwrap_or(0),
         )
+    }
+
+    /// Select an exact row, respecting the same restrictions as keyboard navigation.
+    pub fn select_at_index(
+        index: usize,
+        lines: &[StatusOutputLine],
+        mode: &Mode,
+        show_files: FilesStatusFlag,
+    ) -> Option<Cursor> {
+        is_cursor_selectable_at_index(index, lines, mode, show_files).then_some(Cursor(index))
     }
 
     pub fn index(self) -> usize {
@@ -89,9 +100,7 @@ impl Cursor {
             ResolvedCliIdArg::AnonymousSegment(..)
             | ResolvedCliIdArg::Commit(..)
             | ResolvedCliIdArg::Branch(..)
-            | ResolvedCliIdArg::Worktree(..)
-            | ResolvedCliIdArg::WorktreeUncommitted(..)
-            | ResolvedCliIdArg::Uncommitted
+            | ResolvedCliIdArg::Uncommitted(..)
             | ResolvedCliIdArg::UncommittedHunkOrFile(..)
             | ResolvedCliIdArg::CommittedFile(..) => {}
             ResolvedCliIdArg::CommittedHunk(..) => {
@@ -122,9 +131,7 @@ impl Cursor {
                         | CliId::CommittedHunk { .. }
                         | CliId::Branch(..)
                         | CliId::Commit { .. }
-                        | CliId::Uncommitted { .. }
-                        | CliId::Worktree { .. }
-                        | CliId::WorktreeUncommitted { .. }
+                        | CliId::UncommittedArea { .. }
                         | CliId::Stack { .. } => false,
                     }
                 }
@@ -133,10 +140,8 @@ impl Cursor {
                 | ResolvedCliIdArg::Branch(..)
                 | ResolvedCliIdArg::UncommittedHunkOrFile(..)
                 | ResolvedCliIdArg::CommittedFile(..)
-                | ResolvedCliIdArg::Uncommitted
+                | ResolvedCliIdArg::Uncommitted(..)
                 | ResolvedCliIdArg::PathPrefix { .. }
-                | ResolvedCliIdArg::Worktree(..)
-                | ResolvedCliIdArg::WorktreeUncommitted(..)
                 | ResolvedCliIdArg::Stack { .. }
                 | ResolvedCliIdArg::CommittedHunk(..) => target == **cli_id,
             })
@@ -407,6 +412,23 @@ impl Cursor {
         Some(Self(idx))
     }
 
+    /// Select the first line that points to the given worktree.
+    pub fn select_worktree(worktree_name: &BStr, lines: &[StatusOutputLine]) -> Option<Self> {
+        let idx = lines.iter().position(|line| {
+            matches!(
+                line.data,
+                StatusOutputLineData::Branch { .. }
+                    if line
+                        .data
+                        .cli_id()
+                        .and_then(|id| id.lane())
+                        .and_then(LaneId::worktree_name)
+                        == Some(worktree_name)
+            )
+        })?;
+        Some(Self(idx))
+    }
+
     /// Select the first uncommitted file line that points to the given path in the given stack.
     pub fn select_uncommitted_file(path: &BStr, lines: &[StatusOutputLine]) -> Option<Self> {
         let idx = lines.iter().position(|line| {
@@ -427,7 +449,10 @@ impl Cursor {
         let idx = lines.iter().position(|line| {
             matches!(
                 line.data.cli_id().map(|id| &**id),
-                Some(CliId::Uncommitted { .. })
+                Some(CliId::UncommittedArea {
+                    source: ChangeSourceId::Head,
+                    ..
+                })
             )
         })?;
         Some(Self(idx))
@@ -480,9 +505,7 @@ impl Cursor {
                 | Some(CliId::PathPrefix { .. })
                 | Some(CliId::Branch(..))
                 | Some(CliId::Commit { .. })
-                | Some(CliId::Uncommitted { .. })
-                | Some(CliId::Worktree { .. })
-                | Some(CliId::WorktreeUncommitted { .. })
+                | Some(CliId::UncommittedArea { .. })
                 | Some(CliId::Stack { .. }) => matches!(show_files, FilesStatusFlag::All),
                 Some(CliId::CommittedHunk(..)) | None => false,
             };
@@ -504,7 +527,6 @@ impl Cursor {
                 StatusOutputLineData::Commit { .. }
                 | StatusOutputLineData::Branch { .. }
                 | StatusOutputLineData::StagedChanges { .. }
-                | StatusOutputLineData::Worktree { .. }
                 | StatusOutputLineData::WorktreeUncommitted { .. }
                 | StatusOutputLineData::UncommittedChanges { .. } => line.data.cli_id(),
                 StatusOutputLineData::UpdateNotice
@@ -521,6 +543,29 @@ impl Cursor {
                 | StatusOutputLineData::Hint
                 | StatusOutputLineData::NoAssignmentsUnstaged => None,
             })
+    }
+
+    /// Select the first row allowed by the current mode and file scope.
+    pub fn select_first(
+        lines: &[StatusOutputLine],
+        mode: &Mode,
+        show_files: FilesStatusFlag,
+    ) -> Option<Cursor> {
+        (0..lines.len())
+            .find(|idx| is_cursor_selectable_at_index(*idx, lines, mode, show_files))
+            .map(Cursor)
+    }
+
+    /// Select the last row allowed by the current mode and file scope.
+    pub fn select_last(
+        lines: &[StatusOutputLine],
+        mode: &Mode,
+        show_files: FilesStatusFlag,
+    ) -> Option<Cursor> {
+        (0..lines.len())
+            .rev()
+            .find(|idx| is_cursor_selectable_at_index(*idx, lines, mode, show_files))
+            .map(Cursor)
     }
 
     #[must_use]
@@ -753,13 +798,11 @@ impl Cursor {
             {
                 // A worktree lane opens on its uncommitted area and closes on `├╯`, so every lane
                 // nested in the selected branch adds exactly one connector to cross before the
-                // branch's own closing connector is reached. The reference row sits inside the
-                // lane and never opens one:
+                // branch's own closing connector is reached:
                 //
                 //     ┊╭┄ br [branch]
                 //     ┊┊
                 //     ┊┊╭┄ wt:@ {worktree uncommitted}
-                //     ┊┊├┄ wt {worktree}
                 //     ┊┊●   abc (no commit message)
                 //     ┊├╯
                 //     ┊●   abc (no commit message)
@@ -796,7 +839,6 @@ impl Cursor {
                     | StatusOutputLineData::StagedChanges { .. }
                     | StatusOutputLineData::StagedFile { .. }
                     | StatusOutputLineData::UncommittedChanges { .. }
-                    | StatusOutputLineData::Worktree { .. }
                     | StatusOutputLineData::WorktreeUncommitted { .. }
                     | StatusOutputLineData::UncommittedFile { .. }
                     | StatusOutputLineData::CommitMessage
@@ -970,28 +1012,13 @@ pub(super) fn same_entity_for_reload(previous: &CliId, current: &CliId) -> bool 
                 false
             }
         }
-        CliId::Uncommitted { id: _ } => matches!(current, CliId::Uncommitted { id: _ }),
-        CliId::WorktreeUncommitted {
+        CliId::UncommittedArea {
             id: _,
-            name: previous,
+            source: previous,
         } => {
-            if let CliId::WorktreeUncommitted {
+            if let CliId::UncommittedArea {
                 id: _,
-                name: current,
-            } = current
-            {
-                previous == current
-            } else {
-                false
-            }
-        }
-        CliId::Worktree {
-            id: _,
-            name: previous,
-        } => {
-            if let CliId::Worktree {
-                id: _,
-                name: current,
+                source: current,
             } = current
             {
                 previous == current
@@ -1026,12 +1053,10 @@ fn select_after_reload_for_cli_id(cli_id: &Arc<CliId>) -> SelectAfterReload {
         } => SelectAfterReload::FirstFileInCommit(*commit_id),
         CliId::AnonymousSegment(..)
         | CliId::CommittedHunk(..)
-        | CliId::Uncommitted { .. }
+        | CliId::UncommittedArea { .. }
         | CliId::UncommittedHunkOrFile(..)
         | CliId::PathPrefix { .. }
         | CliId::Branch(..)
-        | CliId::Worktree { .. }
-        | CliId::WorktreeUncommitted { .. }
         | CliId::Stack { .. } => SelectAfterReload::CliId(Box::new((**cli_id).clone())),
     }
 }
@@ -1042,7 +1067,6 @@ fn is_discard_commit_boundary(line: &StatusOutputLine) -> bool {
         StatusOutputLineData::Branch { .. }
         | StatusOutputLineData::StagedChanges { .. }
         | StatusOutputLineData::UncommittedChanges { .. }
-        | StatusOutputLineData::Worktree { .. }
         | StatusOutputLineData::WorktreeUncommitted { .. }
         | StatusOutputLineData::MergeBase => true,
         StatusOutputLineData::UpdateNotice
@@ -1076,12 +1100,12 @@ fn is_section_header(line: &StatusOutputLine, mode: &Mode) -> bool {
         | Mode::Squash(..)
         | Mode::CherryPick(..)
         | Mode::Branch(..)
+        | Mode::Worktree(..)
         | Mode::Details(..) => {
             matches!(
                 line.data,
                 StatusOutputLineData::Branch { .. }
                     | StatusOutputLineData::UncommittedChanges { .. }
-                    | StatusOutputLineData::Worktree { .. }
                     | StatusOutputLineData::WorktreeUncommitted { .. }
                     | StatusOutputLineData::MergeBase
             )
@@ -1115,7 +1139,7 @@ fn is_noop_move_stack_target(idx: usize, lines: &[StatusOutputLine], mode: &Mode
         return false;
     }
 
-    let Some(source_stack_id) = move_mode.source.branch.stack_id else {
+    let Some(source_stack_id) = move_mode.source.branch.lane.stack_id() else {
         return false;
     };
     let current_stack_order = super::app::stack_ids_in_display_order(lines);
@@ -1184,6 +1208,7 @@ pub fn is_selectable_in_mode(
         }
         ModeRef::Command(..)
         | ModeRef::Branch(..)
+        | ModeRef::Worktree(..)
         | ModeRef::InlineReword(..)
         | ModeRef::Normal(..)
         | ModeRef::PickChanges(..)
@@ -1261,6 +1286,7 @@ pub fn is_selectable_in_mode(
         | ModeRef::MoveStack(..)
         | ModeRef::Jump(..)
         | ModeRef::CherryPick(..)
+        | ModeRef::Worktree(..)
         | ModeRef::Stack(..) => {}
     }
 
@@ -1299,18 +1325,27 @@ pub fn is_selectable_in_mode(
             cherry_pick_operation_display(&line.data, cherry_pick_mode).is_some()
         }
         ModeRef::Branch(branch_mode) => branch_operation_display(&line.data, branch_mode).is_some(),
+        ModeRef::Worktree(worktree_mode) => {
+            worktree_operation_display(&line.data, worktree_mode).is_some()
+        }
         ModeRef::PickChanges(..) => {
             if let Some(cli_id) = line.data.cli_id() {
                 match &**cli_id {
-                    CliId::UncommittedHunkOrFile(..) | CliId::Uncommitted { .. } => true,
+                    CliId::UncommittedHunkOrFile(..)
+                    | CliId::UncommittedArea {
+                        source: ChangeSourceId::Head,
+                        ..
+                    } => true,
                     CliId::AnonymousSegment(..)
                     | CliId::PathPrefix { .. }
                     | CliId::CommittedFile { .. }
                     | CliId::CommittedHunk { .. }
                     | CliId::Branch(..)
                     | CliId::Commit { .. }
-                    | CliId::Worktree { .. }
-                    | CliId::WorktreeUncommitted { .. }
+                    | CliId::UncommittedArea {
+                        source: ChangeSourceId::Worktree(_),
+                        ..
+                    }
                     | CliId::Stack { .. } => false,
                 }
             } else {

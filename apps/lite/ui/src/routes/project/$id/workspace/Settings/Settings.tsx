@@ -1,11 +1,11 @@
-import { Modal } from "#ui/components/Popup.tsx";
+import { Modal } from "@gitbutler/ui-react/Popup.tsx";
 import { Suspense, useState, type FC } from "react";
-import { classes } from "#ui/components/classes.ts";
-import { Icon } from "#ui/components/Icon.tsx";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { ScrollArea } from "@gitbutler/ui-react/ScrollArea.tsx";
 import styles from "./Settings.module.css";
 import {
 	defaultSettingsPageKey,
-	externalLinks,
 	settingsPagesInScope,
 	settingsScopes,
 	type SettingsPageKey,
@@ -60,78 +60,62 @@ export const Settings: FC<Props> = (p) => {
 		.map((scope) => ({ scope, pages: settingsPagesInScope(scope) }))
 		.filter((group) => group.pages.length > 0);
 
-	// A lone group has nothing to be told apart from.
-	const showHeadings = groups.length > 1;
-
 	const Content = pageContent[selected];
 
 	return (
 		<Modal
-			size="medium"
+			size="large"
 			recessed
 			open={p.open}
 			onOpenChange={p.onOpenChange}
 			aria-labelledby="settings-heading"
 			className={styles.popup}
 		>
-			<nav aria-label="Settings pages" className={styles.sidebar}>
-				<h1 id="settings-heading" className={classes("text-14", "text-bold", styles.heading)}>
-					Settings
-				</h1>
+			<ScrollArea className={styles.sidebar}>
+				<nav aria-label="Settings pages" className={styles.nav}>
+					<h1 id="settings-heading" className={classes("text-16", "text-semibold", styles.heading)}>
+						Settings
+					</h1>
 
-				{groups.map((group) => (
-					<div key={group.scope} className={styles.group}>
-						{showHeadings && (
-							<h2 className={classes("text-12", styles.groupHeading)}>
-								{group.scope === "global" ? "Application" : p.projectName}
-							</h2>
-						)}
+					{groups.map((group) => (
+						<div key={group.scope} className={styles.group}>
+							{/* The application's pages need no heading: the dialog's own is theirs. The
+							    project's are the ones a reader has to be told belong to something else. */}
+							{group.scope === "project" && (
+								<h2 className={classes("text-13", "text-semibold", styles.groupHeading)}>
+									<Icon name="folder" className={styles.linkIcon} />
+									<span className={styles.groupHeadingName}>{p.projectName}</span>
+								</h2>
+							)}
 
-						{group.pages.map((page) => (
-							<button
-								key={page.key}
-								type="button"
-								aria-current={page.key === selected ? "page" : undefined}
-								className={classes(
-									"text-13",
-									"text-semibold",
-									styles.link,
-									page.key === selected && styles.linkSelected,
-								)}
-								onClick={() => setSelected(page.key)}
-							>
-								<Icon name={page.icon} className={styles.linkIcon} />
-								<span>{page.label}</span>
-							</button>
-						))}
-					</div>
-				))}
-
-				<div className={styles.social}>
-					{externalLinks.map((link) => (
-						<button
-							key={link.label}
-							type="button"
-							className={classes("text-13", "text-semibold", styles.link)}
-							onClick={() => void window.lite.openInWebBrowser(link.url)}
-						>
-							<Icon name={link.icon} className={styles.linkIcon} />
-							<span>{link.label}</span>
-							<span aria-hidden className={styles.linkExternal}>
-								↗
-							</span>
-						</button>
+							{group.pages.map((page) => (
+								<button
+									key={page.key}
+									type="button"
+									aria-current={page.key === selected ? "page" : undefined}
+									className={classes(
+										"text-13",
+										styles.link,
+										page.key === selected && styles.linkSelected,
+									)}
+									onClick={() => setSelected(page.key)}
+								>
+									<Icon name={page.icon} className={styles.linkIcon} />
+									<span>{page.label}</span>
+								</button>
+							))}
+						</div>
 					))}
-				</div>
-			</nav>
+				</nav>
+			</ScrollArea>
 
-			<div className={styles.content}>
+			<ScrollArea className={styles.content}>
 				<div className={styles.contentColumn}>
 					<Suspense fallback={<div className="text-13">Loading…</div>}>
 						<Content projectId={p.projectId} />
 					</Suspense>
 				</div>
-			</div>
+			</ScrollArea>
 		</Modal>
 	);
 };

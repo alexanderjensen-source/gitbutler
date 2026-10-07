@@ -596,6 +596,230 @@ mod tests {
         Ok(())
     }
 
+    fn open_review(number: i64, source_branch: &str) -> but_forge::ForgeReview {
+        but_forge::ForgeReview {
+            html_url: String::new(),
+            number,
+            title: String::new(),
+            body: None,
+            author: None,
+            labels: Vec::new(),
+            draft: false,
+            source_branch: source_branch.into(),
+            target_branch: "main".into(),
+            sha: String::new(),
+            integration_commit_shas: Vec::new(),
+            created_at: None,
+            modified_at: None,
+            merged_at: None,
+            closed_at: None,
+            repository_ssh_url: None,
+            repository_https_url: None,
+            repo_owner: None,
+            head_repo_is_fork: false,
+            auto_merge_enabled: false,
+            reviewers: Vec::new(),
+            unit_symbol: "#".into(),
+            last_sync_at: Default::default(),
+        }
+    }
+
+    /// `C` checked out over `B` over `A`, with a linked worktree on branch `W` resting on `B`,
+    /// and open reviews #1 on `A`, #2 on `B` and #3 on `W`.
+    fn context_with_worktree_on_reviewed_stack() -> Result<(Context, tempfile::TempDir)> {
+        context_with_worktree_on_reviewed_stack_at("B")
+    }
+
+    /// `C` checked out over `B` over `A`, each two commits deep, with a linked worktree on branch
+    /// `W` resting on `worktree_base`, and open reviews #1 on `A`, #2 on `B` and #3 on `W`.
+    fn context_with_worktree_on_reviewed_stack_at(
+        worktree_base: &str,
+    ) -> Result<(Context, tempfile::TempDir)> {
+        let tmp = tempfile::tempdir()?;
+        let git = |args: &[&str]| git_at_dir(tmp.path()).args(args).run();
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "GitButler"]);
+        git(&["config", "user.email", "gitbutler@example.com"]);
+        git(&["commit", "--allow-empty", "-m", "base"]);
+        git(&["config", "remote.origin.url", "../origin"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        for branch in ["A", "B", "C"] {
+            git(&["checkout", "-b", branch]);
+            git(&["commit", "--allow-empty", "-m", &format!("{branch} 1")]);
+            git(&["commit", "--allow-empty", "-m", &format!("{branch} 2")]);
+        }
+        let worktree = tmp.path().join("worktrees").join("W");
+        git_at_dir(tmp.path())
+            .args(["worktree", "add", "-b", "W"])
+            .arg(&worktree)
+            .arg(worktree_base)
+            .run();
+        git_at_dir(&worktree)
+            .args(["commit", "--allow-empty", "-m", "W"])
+            .run();
+        // Pushed as they are: a review associates through the branch's remote-tracking ref.
+        for branch in ["A", "B", "W"] {
+            git(&[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                branch,
+            ]);
+        }
+
+        let repo = open_repo(tmp.path())?;
+        ProjectMeta {
+            target_ref: Some("refs/remotes/origin/main".try_into()?),
+            target_commit_id: Some(repo.rev_parse_single("refs/remotes/origin/main")?.detach()),
+            push_remote: Some("origin".into()),
+        }
+        .persist(&repo)?;
+        let mut ctx = but_ctx::Context::from_repo_for_testing(repo)?.with_memory_app_cache();
+        ctx.settings.feature_flags.worktree_manipulation = true;
+        let reviews = [(1, "A"), (2, "B"), (3, "W")];
+        {
+            let mut db = ctx.db.get_cache_mut()?;
+            // Adoption already ran, so the worktree on disk counts as active.
+            db.worktree_meta_mut().mark_adopted()?;
+            for (number, branch) in reviews {
+                but_forge::cache_review(&mut db, &open_review(number, branch))?;
+            }
+        }
+        for (number, branch) in reviews {
+            let branch = gix::refs::Category::LocalBranch.to_full_name(branch)?;
+            persist_review_association(&ctx, branch.as_ref(), number as usize)?;
+        }
+        Ok((ctx, tmp))
+    }
+
+    fn numbered_targets(
+        groups: Vec<Vec<but_forge::ForgeReviewUpdate>>,
+    ) -> Vec<Vec<(i64, Option<String>)>> {
+        groups
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|update| (update.number, update.target_branch))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_worktree_on_a_reviewed_stack_syncs_alone_while_the_stack_stays_one_group() -> Result<()> {
+        let (ctx, _tmp) = context_with_worktree_on_reviewed_stack()?;
+        let w: gix::refs::FullName = "refs/heads/W".try_into()?;
+        let b: gix::refs::FullName = "refs/heads/B".try_into()?;
+
+        assert_eq!(
+            numbered_targets(review_update_groups_for_branch(&ctx, w.as_ref())?),
+            [
+                vec![(3, Some("B".into()))],
+                vec![(1, Some("main".into())), (2, Some("A".into()))],
+            ],
+            "the worktree review targets the nearest reviewed branch beneath it but joins no stack, while the stack it rests on is synced whole"
+        );
+        assert_eq!(
+            numbered_targets(review_update_groups_for_branch(&ctx, b.as_ref())?),
+            [vec![(1, Some("main".into())), (2, Some("A".into()))]],
+            "a stack branch does not drag the worktree resting on it into its sync"
+        );
+        assert_eq!(
+            review_target_updates_for_branch(&ctx, w.as_ref())?
+                .iter()
+                .map(|(update, current)| (
+                    update.number,
+                    update.target_branch.as_str(),
+                    current.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (3, "B", Some("main")),
+                (1, "main", Some("main")),
+                (2, "A", Some("main")),
+            ],
+            "pre-push flattening sees every review along the chain with its cached target"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_worktree_branch_keeps_its_review_in_the_forge_cache_only() -> Result<()> {
+        let (ctx, _tmp) = context_with_worktree_on_reviewed_stack()?;
+        let w: gix::refs::FullName = "refs/heads/W".try_into()?;
+
+        assert!(
+            but_core::ref_metadata::ValueInfo::is_default(&ctx.meta()?.branch(w.as_ref())?),
+            "workspace metadata holds no entry for a branch only a worktree holds"
+        );
+        assert_eq!(
+            local_branch_for_review(&ctx, 3)?,
+            w,
+            "the cache alone associates the worktree branch with its review"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_review_targets_the_nearest_reviewed_branch_beneath_it() -> Result<()> {
+        let (ctx, _tmp) = context_with_worktree_on_reviewed_stack()?;
+        let target = |branch: &str| -> Result<String> {
+            let branch = gix::refs::Category::LocalBranch.to_full_name(branch)?;
+            review_creation_target(&ctx, branch.as_ref())
+        };
+
+        assert_eq!(
+            [target("A")?, target("B")?, target("W")?],
+            ["main", "A", "B"],
+            "each review stacks on the reviewed branch beneath it, across the worktree boundary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_review_target_needs_nothing_pushed() -> Result<()> {
+        let (ctx, _tmp) = context_with_worktree_on_reviewed_stack()?;
+        let target = |branch: &str| new_review_target(&ctx, format!("refs/heads/{branch}"));
+
+        assert_eq!(
+            [target("A")?, target("B")?, target("C")?, target("W")?],
+            ["main", "A", "B", "B"],
+            "the unpushed `C` shows the target its review will get once pushed"
+        );
+        assert!(
+            review_creation_target(&ctx, "refs/heads/C".try_into()?).is_err(),
+            "creation still requires `C` to be pushed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_worktree_resting_inside_a_reviewed_branch_targets_that_branch() -> Result<()> {
+        let (ctx, tmp) = context_with_worktree_on_reviewed_stack_at("B~1")?;
+        let w: gix::refs::FullName = "refs/heads/W".try_into()?;
+
+        assert_eq!(
+            review_creation_target(&ctx, w.as_ref())?,
+            "B",
+            "the review shows only the worktree's own commits against the branch it forks from"
+        );
+        assert_eq!(
+            numbered_targets(review_update_groups_for_branch(&ctx, w.as_ref())?)[0],
+            [(3, Some("B".into()))],
+            "creation agrees with the target sync maintains"
+        );
+
+        git_at_dir(tmp.path())
+            .args(["update-ref", "refs/remotes/origin/W", "main"])
+            .run();
+        assert!(
+            review_creation_target(&ctx, w.as_ref())
+                .is_err_and(|err| err.to_string().contains("remote ancestry does not match")),
+            "a pushed worktree missing the commit it rests on has not pushed what it stacks on"
+        );
+        Ok(())
+    }
+
     #[test]
     fn unchanged_review_targets_do_not_need_pre_push_flattening() {
         let reviews = [
@@ -616,7 +840,7 @@ mod tests {
         ];
 
         assert!(
-            review_target_flattening_plan(&reviews).is_none(),
+            review_target_flattening_plan(&reviews, "main").is_none(),
             "an ordinary push should not contact the forge before pushing"
         );
     }
@@ -640,9 +864,8 @@ mod tests {
             ),
         ];
 
-        let (trunk, reviews_to_flatten) =
-            review_target_flattening_plan(&reviews).expect("the reviewed stack was reordered");
-        assert_eq!(trunk, "main");
+        let reviews_to_flatten = review_target_flattening_plan(&reviews, "main")
+            .expect("the reviewed stack was reordered");
         assert_eq!(
             reviews_to_flatten,
             std::collections::HashSet::from([1]),
@@ -670,7 +893,7 @@ mod tests {
         ];
 
         assert!(
-            review_target_flattening_plan(&reviews).is_none(),
+            review_target_flattening_plan(&reviews, "main").is_none(),
             "missing cache data must not cause remote mutations before a push"
         );
     }
@@ -1277,6 +1500,33 @@ pub fn list_ci_checks_for_ref(
     )
 }
 
+/// The branch a new review for `branch` targets: the nearest branch beneath it along its lane
+/// chain that has an open review, or the target branch when none has.
+///
+/// Unlike [`publish_review`], nothing needs to be pushed yet, so a caller can show the target
+/// before pushing. `branch` is a full reference name.
+#[but_api(napi, provides = [Workspace, Reviews])]
+#[instrument(err(Debug))]
+pub fn new_review_target(ctx: &Context, branch: String) -> Result<String> {
+    let branch: gix::refs::FullName = branch.try_into()?;
+    let info = crate::legacy::workspace::head_info(ctx)?;
+    let chain = lane_chain_for_branch(&info, branch.as_ref())?;
+    let (selected, beneath) = chain
+        .split_first()
+        .expect("a non-empty chain starts with the branch's own lane");
+    match reviewed_ancestors(*selected, beneath, &open_review_numbers(ctx)?).first() {
+        Some(nearest) => Ok(nearest
+            .segment
+            .ref_name()
+            .context("A reviewed segment is named by its branch")?
+            .shorten()
+            .to_str()
+            .context("Workspace branch name is not valid UTF-8")?
+            .to_owned()),
+        None => target_short_name(&ctx.project_meta()?, &*ctx.repo.get()?),
+    }
+}
+
 #[but_api(napi, invalidates = [Reviews, Branches, Workspace])]
 #[instrument(err(Debug))]
 pub async fn publish_review(
@@ -1388,11 +1638,24 @@ pub async fn publish_review_only(
 /// Record `review_number` as the branch's review identity. The stored
 /// `review_id` is left untouched: it identifies a GitButler review, which
 /// publishing a forge review does not supersede.
+///
+/// A branch only a linked worktree holds is skipped: workspace metadata would
+/// record it as a stack outside the workspace, so the forge cache carries its
+/// association instead.
 fn persist_review_association(
     ctx: &Context,
     branch_name: &gix::refs::FullNameRef,
     review_number: usize,
 ) -> Result<()> {
+    let info = crate::legacy::workspace::head_info(ctx)?;
+    let in_worktree_lane = info
+        .worktrees
+        .iter()
+        .flat_map(|worktree| &worktree.segments)
+        .any(|segment| segment.ref_name() == Some(branch_name));
+    if in_worktree_lane {
+        return Ok(());
+    }
     let mut meta = ctx.meta()?;
     let mut branch = meta.branch(branch_name)?;
     branch.review.pull_request = Some(review_number);
@@ -1650,9 +1913,10 @@ pub(crate) struct ReviewTargetFlattening {
 /// desired stacked targets.
 pub(crate) async fn flatten_review_targets_before_push(
     ctx: ThreadSafeContext,
+    trunk: String,
     reviews: &[(but_forge::ForgeReviewTargetUpdate, Option<String>)],
 ) -> Result<Option<ReviewTargetFlattening>> {
-    let Some((trunk, reviews_to_flatten)) = review_target_flattening_plan(reviews) else {
+    let Some(reviews_to_flatten) = review_target_flattening_plan(reviews, &trunk) else {
         return Ok(None);
     };
 
@@ -1771,7 +2035,8 @@ pub(crate) async fn restore_review_targets(
 
 fn review_target_flattening_plan(
     reviews: &[(but_forge::ForgeReviewTargetUpdate, Option<String>)],
-) -> Option<(String, std::collections::HashSet<i64>)> {
+    trunk: &str,
+) -> Option<std::collections::HashSet<i64>> {
     if reviews.iter().any(|(_, current)| current.is_none()) {
         return None;
     }
@@ -1781,14 +2046,13 @@ fn review_target_flattening_plan(
     if !targets_changed {
         return None;
     }
-
-    let trunk = reviews.first()?.0.target_branch.clone();
-    let reviews_to_flatten = reviews
-        .iter()
-        .filter(|(_, current)| current.as_deref() != Some(trunk.as_str()))
-        .map(|(review, _)| review.number)
-        .collect();
-    Some((trunk, reviews_to_flatten))
+    Some(
+        reviews
+            .iter()
+            .filter(|(_, current)| current.as_deref() != Some(trunk))
+            .map(|(review, _)| review.number)
+            .collect(),
+    )
 }
 
 /// Synchronize every review in the workspace stack containing `branch`.
@@ -1800,18 +2064,11 @@ pub async fn sync_review_stack_for_branch(
     ctx: ThreadSafeContext,
     branch: gix::refs::FullName,
 ) -> but_forge::ReviewSyncOutcome {
-    let updates = {
+    let update_groups = {
         let ctx = ctx.clone().into_thread_local();
-        review_updates_for_branch(&ctx, branch.as_ref())
+        review_update_groups_for_branch(&ctx, branch.as_ref())
     };
-    sync_review_updates(ctx, updates).await
-}
-
-async fn sync_review_updates(
-    ctx: ThreadSafeContext,
-    updates: Result<Vec<but_forge::ForgeReviewUpdate>>,
-) -> but_forge::ReviewSyncOutcome {
-    sync_review_update_groups(ctx, updates.map(|updates| vec![updates])).await
+    sync_review_update_groups(ctx, update_groups).await
 }
 
 async fn sync_review_update_groups(
@@ -1897,35 +2154,16 @@ fn review_updates_after_push(
     pushed_branches: &[(String, String, String)],
 ) -> Result<Vec<Vec<but_forge::ForgeReviewUpdate>>> {
     let info = crate::legacy::workspace::head_info(ctx)?;
-    let selected_stack_index = info
-        .stacks
-        .iter()
-        .position(|stack| {
-            stack.segments.iter().any(|segment| {
-                segment
-                    .ref_info
-                    .as_ref()
-                    .is_some_and(|ref_info| ref_info.ref_name == branch)
-            })
-        })
-        .with_context(|| {
-            format!(
-                "Branch `{}` is not part of the current workspace",
-                branch.shorten()
-            )
-        })?;
+    let chain = lane_chain_for_branch(&info, branch)?;
 
     let open_reviews = open_review_numbers(ctx)?;
     let reviewed_branches = info
-        .stacks
-        .iter()
-        .flat_map(|stack| &stack.segments)
+        .lanes()
+        .flat_map(|lane| lane.segments)
         .filter(|segment| review_number(segment, &open_reviews).is_some())
         .filter_map(|segment| {
             segment
-                .ref_info
-                .as_ref()?
-                .ref_name
+                .ref_name()?
                 .shorten()
                 .to_str()
                 .ok()
@@ -1945,9 +2183,12 @@ fn review_updates_after_push(
     }
 
     let repo = ctx.repo.get()?;
-    let mut affected_stack_indices = std::collections::BTreeSet::from([selected_stack_index]);
-    for (stack_index, stack) in info.stacks.iter().enumerate() {
-        'segments: for segment in &stack.segments {
+    let mut affected_lanes = chain.iter().map(|(lane, _)| *lane).collect::<Vec<_>>();
+    for lane in info.lanes() {
+        if affected_lanes.contains(&lane) {
+            continue;
+        }
+        'segments: for segment in lane.segments {
             if review_number(segment, &open_reviews).is_none() {
                 continue;
             }
@@ -1958,7 +2199,7 @@ fn review_updates_after_push(
                 if remote_contains(&repo, *previous_tip, head.remote_tip)?
                     || remote_contains(&repo, head.remote_tip, *previous_tip)?
                 {
-                    affected_stack_indices.insert(stack_index);
+                    affected_lanes.push(lane);
                     break 'segments;
                 }
             }
@@ -1966,83 +2207,101 @@ fn review_updates_after_push(
     }
 
     let base_branch = target_short_name(&ctx.project_meta()?, &*ctx.repo.get()?)?;
-    Ok(affected_stack_indices
+    Ok(affected_lanes
         .into_iter()
-        .map(|index| {
-            review_updates_for_stack(&info.stacks[index], &base_branch, &open_reviews)
-                .into_iter()
-                .map(|(_, update)| update.into())
-                .collect()
-        })
+        .flat_map(|lane| review_update_groups_for_lane(&info, lane, &base_branch, &open_reviews))
+        .map(|group| group.into_iter().map(|(_, update)| update.into()).collect())
         .collect())
 }
 
-fn review_updates_for_branch(
+/// One update group per GitHub stack across every lane in the chain beneath `branch`.
+fn review_update_groups_for_branch(
     ctx: &Context,
     branch: &gix::refs::FullNameRef,
-) -> Result<Vec<but_forge::ForgeReviewUpdate>> {
+) -> Result<Vec<Vec<but_forge::ForgeReviewUpdate>>> {
     let base_branch = target_short_name(&ctx.project_meta()?, &*ctx.repo.get()?)?;
     let info = crate::legacy::workspace::head_info(ctx)?;
-    let (stack, _) = stack_and_segment_for_branch(&info, branch)?;
+    let chain = lane_chain_for_branch(&info, branch)?;
     let open_reviews = open_review_numbers(ctx)?;
-    Ok(review_updates_for_stack(stack, &base_branch, &open_reviews)
+    Ok(chain
         .into_iter()
-        .map(|(_, update)| update.into())
+        .flat_map(|(lane, _)| {
+            review_update_groups_for_lane(&info, lane, &base_branch, &open_reviews)
+        })
+        .map(|group| group.into_iter().map(|(_, update)| update.into()).collect())
         .collect())
 }
 
+/// The desired target of every reviewed segment in the chain beneath `branch`, along with the
+/// target the forge cache currently records.
 pub(crate) fn review_target_updates_for_branch(
     ctx: &Context,
     branch: &gix::refs::FullNameRef,
-) -> Result<
-    Vec<(
-        gix::refs::FullName,
-        but_forge::ForgeReviewTargetUpdate,
-        Option<String>,
-    )>,
-> {
+) -> Result<Vec<(but_forge::ForgeReviewTargetUpdate, Option<String>)>> {
     let info = crate::legacy::workspace::head_info(ctx)?;
-    let (stack, _) = stack_and_segment_for_branch(&info, branch)?;
+    let chain = lane_chain_for_branch(&info, branch)?;
     let open_reviews = open_review_numbers(ctx)?;
-    if !stack
-        .segments
+    let base_branch = target_short_name(&ctx.project_meta()?, &*ctx.repo.get()?)?;
+    let updates = chain
         .iter()
-        .any(|segment| review_number(segment, &open_reviews).is_some())
-    {
+        .flat_map(|(lane, _)| {
+            review_update_groups_for_lane(&info, *lane, &base_branch, &open_reviews)
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if updates.is_empty() {
         return Ok(Vec::new());
     }
-    let base_branch = target_short_name(&ctx.project_meta()?, &*ctx.repo.get()?)?;
     let db = ctx.db.get_cache()?;
     let cached_targets = but_forge::list_cached_forge_reviews(&db)?
         .into_iter()
         .map(|review| (review.number, review.target_branch))
         .collect::<std::collections::HashMap<_, _>>();
-    Ok(review_updates_for_stack(stack, &base_branch, &open_reviews)
+    Ok(updates
         .into_iter()
-        .map(|(branch, update)| {
+        .map(|(_, update)| {
             let current_target = cached_targets.get(&update.number).cloned();
-            (branch, update, current_target)
+            (update, current_target)
         })
         .collect())
 }
 
-/// One `(branch ref, target update)` pair per reviewed active segment,
-/// bottom-to-top. Refs and updates are derived from one pass over the same
-/// segments, so they cannot fall out of alignment; segments without an
-/// active review (via [`review_number`] — integrated ones included) are
-/// inert for target computation and contribute nothing.
-fn review_updates_for_stack(
-    stack: &but_workspace::branch::Stack,
+/// The `(branch ref, target update)` pairs of `lane`'s reviewed segments, bottom-to-top,
+/// grouped per GitHub stack.
+///
+/// A lane resting on the target is one linear stack. A lane resting on another lane would make
+/// the stack a tree, which GitHub cannot represent, so each of its reviews stands alone with the
+/// nearest reviewed segment beneath it as target. Refs and updates are derived from one pass
+/// over the same segments, so they cannot fall out of alignment; segments without an active
+/// review (via [`review_number`] — integrated ones included) are inert for target computation
+/// and contribute nothing.
+fn review_update_groups_for_lane(
+    info: &but_workspace::RefInfo,
+    lane: but_workspace::ref_info::Lane<'_>,
     base_branch: &str,
     open_reviews: &std::collections::HashSet<i64>,
-) -> Vec<(gix::refs::FullName, but_forge::ForgeReviewTargetUpdate)> {
-    let reviewed = stack
+) -> Vec<Vec<(gix::refs::FullName, but_forge::ForgeReviewTargetUpdate)>> {
+    let bottom = (lane, lane.segments.len() - 1);
+    let nearest_reviewed_beneath =
+        reviewed_ancestors(bottom, &info.lanes_beneath(lane), open_reviews)
+            .into_iter()
+            .find_map(|ancestor| {
+                ancestor
+                    .segment
+                    .ref_name()?
+                    .shorten()
+                    .to_str()
+                    .ok()
+                    .map(ToOwned::to_owned)
+            });
+    let bottom_target = nearest_reviewed_beneath.as_deref().unwrap_or(base_branch);
+    let reviewed = lane
         .segments
         .iter()
         .rev()
         .filter_map(|segment| {
             let number = review_number(segment, open_reviews)?;
-            let ref_name = segment.ref_info.as_ref()?.ref_name.clone();
+            let ref_name = segment.ref_name()?.to_owned();
             let short = ref_name.shorten().to_str().ok()?.to_owned();
             Some((ref_name, short, number))
         })
@@ -2051,36 +2310,56 @@ fn review_updates_for_stack(
         .iter()
         .map(|(_, short, number)| (short.clone(), Some(*number)))
         .collect::<Vec<_>>();
-    let updates = but_forge::compute_review_target_updates(&heads, base_branch);
-    reviewed
+    let updates = but_forge::compute_review_target_updates(&heads, bottom_target);
+    let updates = reviewed
         .into_iter()
         .map(|(ref_name, _, _)| ref_name)
         .zip(updates)
-        .collect()
+        .collect::<Vec<_>>();
+    if lane.rests_on.is_some() {
+        updates.into_iter().map(|update| vec![update]).collect()
+    } else {
+        vec![updates]
+    }
 }
 
-fn review_creation_target(ctx: &Context, branch: &gix::refs::FullNameRef) -> Result<String> {
+/// The branch a new review for `branch` targets, once `branch` and everything beneath it is
+/// pushed: the nearest branch beneath it along its lane chain that has an open review, or the
+/// target branch when none has.
+///
+/// Errors if a branch is not pushed, or its remote history does not continue from the
+/// reviewed branch beneath it, as the review would then show commits that are not its own.
+pub fn review_creation_target(ctx: &Context, branch: &gix::refs::FullNameRef) -> Result<String> {
     let info = crate::legacy::workspace::head_info(ctx)?;
-    let (stack, selected_index) = stack_and_segment_for_branch(&info, branch)?;
+    let chain = lane_chain_for_branch(&info, branch)?;
     let repo = ctx.repo.get()?;
 
     let open_reviews = open_review_numbers(ctx)?;
-    let mut reviewed_ancestors = stack.segments[selected_index + 1..]
-        .iter()
-        .rev()
-        .filter(|segment| review_number(segment, &open_reviews).is_some())
-        .map(|segment| remote_head(&repo, segment))
-        .collect::<Result<Vec<_>>>()?;
-    let selected = remote_head(&repo, &stack.segments[selected_index])?;
+    let ((lane, selected_index), beneath) = chain
+        .split_first()
+        .expect("a non-empty chain starts with the branch's own lane");
+    let mut reviewed_ancestors =
+        reviewed_ancestors((*lane, *selected_index), beneath, &open_reviews)
+            .into_iter()
+            .map(|ancestor| Ok((remote_head(&repo, ancestor.segment)?, ancestor.rested_on)))
+            .collect::<Result<Vec<_>>>()?;
+    reviewed_ancestors.reverse();
+    let selected = remote_head(&repo, &lane.segments[*selected_index])?;
 
-    for pair in reviewed_ancestors
+    let upper_tips = reviewed_ancestors
         .iter()
-        .map(|head| head.remote_tip)
-        .chain(std::iter::once(selected.remote_tip))
-        .collect::<Vec<_>>()
-        .windows(2)
-    {
-        if !remote_contains(&repo, pair[0], pair[1])? {
+        .skip(1)
+        .map(|(head, _)| head.remote_tip)
+        .chain(std::iter::once(selected.remote_tip));
+    for ((lower, rested_on), upper_tip) in reviewed_ancestors.iter().zip(upper_tips) {
+        let stacked = match rested_on {
+            None => remote_contains(&repo, lower.remote_tip, upper_tip)?,
+            Some(fork) => {
+                remote_contains(&repo, *fork, lower.remote_tip)?
+                    && remote_contains(&repo, *fork, upper_tip)?
+            }
+        };
+        if !stacked {
             anyhow::bail!(
                 "Branch `{}` is pushed, but its remote ancestry does not match the reviewed workspace stack; push it and its ancestors before creating a review",
                 branch.shorten()
@@ -2089,9 +2368,47 @@ fn review_creation_target(ctx: &Context, branch: &gix::refs::FullNameRef) -> Res
     }
 
     match reviewed_ancestors.pop() {
-        Some(nearest_reviewed_ancestor) => Ok(nearest_reviewed_ancestor.branch_name),
+        Some((nearest_reviewed_ancestor, _)) => Ok(nearest_reviewed_ancestor.branch_name),
         None => target_short_name(&ctx.project_meta()?, &repo),
     }
+}
+
+/// A segment with an open review beneath a branch.
+struct ReviewedAncestor<'a> {
+    segment: &'a but_workspace::ref_info::Segment,
+    /// The commit the lane above rests on, when that lane rests on this segment. It may sit
+    /// below the segment's tip, so the lanes above fork from it rather than from the tip.
+    rested_on: Option<gix::ObjectId>,
+}
+
+/// The segments with an open review beneath `selected` in its lane and in the lanes `beneath` it,
+/// nearest first.
+fn reviewed_ancestors<'a>(
+    (lane, selected_index): (but_workspace::ref_info::Lane<'a>, usize),
+    beneath: &[(but_workspace::ref_info::Lane<'a>, usize)],
+    open_reviews: &std::collections::HashSet<i64>,
+) -> Vec<ReviewedAncestor<'a>> {
+    let own_lane = lane
+        .segments_from(selected_index + 1)
+        .iter()
+        .map(|segment| ReviewedAncestor {
+            segment,
+            rested_on: None,
+        });
+    let lanes_above = std::iter::once(lane).chain(beneath.iter().map(|(lane, _)| *lane));
+    let lanes_beneath = lanes_above.zip(beneath).flat_map(|(above, (lane, index))| {
+        lane.segments_from(*index)
+            .iter()
+            .enumerate()
+            .map(move |(offset, segment)| ReviewedAncestor {
+                segment,
+                rested_on: above.rests_on.filter(|_| offset == 0),
+            })
+    });
+    own_lane
+        .chain(lanes_beneath)
+        .filter(|ancestor| review_number(ancestor.segment, open_reviews).is_some())
+        .collect()
 }
 
 #[derive(Debug)]
@@ -2100,30 +2417,18 @@ struct RemoteHead {
     remote_tip: gix::ObjectId,
 }
 
-fn stack_and_segment_for_branch<'a>(
+fn lane_chain_for_branch<'a>(
     info: &'a but_workspace::RefInfo,
     branch: &gix::refs::FullNameRef,
-) -> Result<(&'a but_workspace::branch::Stack, usize)> {
-    info.stacks
-        .iter()
-        .find_map(|stack| {
-            stack
-                .segments
-                .iter()
-                .position(|segment| {
-                    segment
-                        .ref_info
-                        .as_ref()
-                        .is_some_and(|ref_info| ref_info.ref_name == branch)
-                })
-                .map(|index| (stack, index))
-        })
-        .with_context(|| {
-            format!(
-                "Branch `{}` is not part of the current workspace",
-                branch.shorten()
-            )
-        })
+) -> Result<Vec<(but_workspace::ref_info::Lane<'a>, usize)>> {
+    let chain = info.lane_chain(branch);
+    if chain.is_empty() {
+        anyhow::bail!(
+            "Branch `{}` is not part of the current workspace",
+            branch.shorten()
+        );
+    }
+    Ok(chain)
 }
 
 /// The numbers of reviews the forge cache currently knows as open.
@@ -2206,17 +2511,13 @@ fn remote_contains(
 fn local_branch_for_review(ctx: &Context, wanted: i64) -> Result<gix::refs::FullName> {
     let info = crate::legacy::workspace::head_info(ctx)?;
     let open_reviews = open_review_numbers(ctx)?;
-    info.stacks
-        .iter()
-        .flat_map(|stack| &stack.segments)
+    info.lanes()
+        .flat_map(|lane| lane.segments)
         .find_map(|segment| {
             // Via review_number so a settled review's number cannot resolve
             // into review-sync targets.
             if review_number(segment, &open_reviews)? == wanted {
-                segment
-                    .ref_info
-                    .as_ref()
-                    .map(|ref_info| ref_info.ref_name.clone())
+                segment.ref_name().map(ToOwned::to_owned)
             } else {
                 None
             }
@@ -2270,11 +2571,7 @@ pub fn warm_ci_checks_cache(ctx: &Context) -> Result<()> {
     let mut current_refs = std::collections::HashSet::new();
 
     // Process each branch that has a PR
-    for segment in workspace
-        .stacks
-        .iter()
-        .flat_map(|stack| stack.segments.iter())
-    {
+    for segment in workspace.lanes().flat_map(|lane| lane.segments) {
         let has_pull_request = segment
             .metadata
             .as_ref()

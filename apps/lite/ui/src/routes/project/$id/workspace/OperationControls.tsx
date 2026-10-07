@@ -7,12 +7,12 @@ import {
 } from "#ui/use-cursor.ts";
 import { absorptionPlanQueryOptions, headInfoQueryOptions } from "#ui/api/queries.ts";
 import { getHeadInfoIndex, type HeadInfoIndex } from "#ui/api/ref-info.ts";
-import { getButtonClassName, type ButtonSize, type ButtonVariant } from "#ui/components/Button.tsx";
-import { Snackbar } from "#ui/components/Snackbar.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
-import type { IconName } from "#ui/components/iconNames.ts";
-import { Kbd } from "#ui/components/Kbd.tsx";
-import { ToggleGroupStyles, ToggleStyles } from "#ui/components/ToggleGroup.tsx";
+import { Button, type ButtonSize, type ButtonVariant } from "@gitbutler/ui-react/Button.tsx";
+import { Snackbar } from "@gitbutler/ui-react/Snackbar.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import type { IconName } from "@gitbutler/ui-react/iconNames.ts";
+import { Kbd } from "@gitbutler/ui-react/Kbd.tsx";
+import { ToggleGroupStyles, ToggleStyles } from "@gitbutler/ui-react/ToggleGroup.tsx";
 import {
 	Toolbox,
 	ToolboxMeta,
@@ -21,8 +21,9 @@ import {
 	ToolboxSection,
 	ToolboxSeparator,
 	ToolboxStack,
-} from "#ui/components/Toolbox.tsx";
-import { formatForDisplaySorted, operationHotkeys } from "#ui/hotkeys.ts";
+} from "@gitbutler/ui-react/Toolbox.tsx";
+import { formatForDisplaySorted } from "@gitbutler/ui-react/formatHotkey.ts";
+import { operationHotkeys } from "#ui/hotkeys.ts";
 import { addressEquals, addressFileParent, type Address } from "#ui/addresses.ts";
 import {
 	getOperations,
@@ -36,7 +37,7 @@ import { isCommitFormKeyEvent } from "#ui/routes/project/$id/workspace/commitFor
 import { addressLabel, addressesLabel } from "#ui/routes/project/$id/workspace/addressLabel.ts";
 import { useCheckedActions } from "#ui/routes/project/$id/workspace/useCheckedActions.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
-import { Button, Toggle, ToggleGroup } from "@base-ui/react";
+import { Toggle, ToggleGroup } from "@base-ui/react";
 import { useHotkeys, type UseHotkeyDefinition } from "@tanstack/react-hotkeys";
 import { useQuery } from "@tanstack/react-query";
 import { Match } from "effect";
@@ -87,7 +88,8 @@ const ToolboxButton: FC<{
 	onClick: () => void;
 }> = ({ label, hotkey, variant, size, enabled = true, onClick }) => (
 	<Button
-		className={getButtonClassName({ variant, size })}
+		variant={variant}
+		size={size}
 		disabled={!enabled}
 		focusableWhenDisabled
 		onMouseDown={(event) => {
@@ -150,7 +152,9 @@ const useControlHotkeys = ({
  */
 const CloseButton: FC<{ onCancel: () => void; size?: ButtonSize }> = ({ onCancel, size }) => (
 	<Button
-		className={getButtonClassName({ variant: "ghost", iconOnly: true, size })}
+		variant="ghost"
+		iconOnly
+		size={size}
 		aria-label="Cancel"
 		onMouseDown={(event) => {
 			// Prevent stealing focus from the tree.
@@ -193,9 +197,14 @@ const CheckedAddressOperationControls: FC<{
 }> = ({ checkedAddressCount, projectId, appliedAddressSpace }) => {
 	const dispatch = useAppDispatch();
 
-	// A primitive, so a check that leaves the context alone doesn't re-render the bar.
 	const checkedContext = useAppSelector((state) =>
 		projectSlice.selectors.selectCheckedAddressesContext(state, projectId),
+	);
+	const checkedFileCount = useAppSelector((state) =>
+		projectSlice.selectors.selectCheckedFileCount(state, projectId),
+	);
+	const checkedLineCount = useAppSelector((state) =>
+		projectSlice.selectors.selectCheckedLineCount(state, projectId),
 	);
 	const actions = useCheckedActions({ projectId, appliedAddressSpace });
 
@@ -213,21 +222,35 @@ const CheckedAddressOperationControls: FC<{
 
 	if (checkedContext === null) return;
 
-	const { noun, icon } = Match.value(checkedContext).pipe(
-		Match.withReturnType<{ noun: string; icon: IconName }>(),
-		Match.when("Commit", () => ({ noun: "commit", icon: "commit" as const })),
-		Match.when("File", () => ({ noun: "file", icon: "file-diff" as const })),
-		Match.when("Hunk", () => ({ noun: "line", icon: "diff" as const })),
+	const icon = Match.value(checkedContext).pipe(
+		Match.withReturnType<IconName>(),
+		Match.when("Commit", () => "commit"),
+		Match.when("File", () => "file-diff"),
+		Match.when("Hunk", () => "diff"),
+		Match.when("FileAndHunk", () => "diff"),
 		Match.exhaustive,
 	);
+
+	const counts: Array<[number, string]> = [
+		[checkedContext === "Commit" ? checkedAddressCount : 0, "commit"],
+		[checkedFileCount, "file"],
+		[checkedLineCount, "line"],
+	];
+
+	const countLabels = counts
+		.values()
+		.filter(([count]) => count > 0)
+		.map(
+			([count, noun]) =>
+				`${new Intl.NumberFormat().format(count)} ${noun}${new Intl.PluralRules().select(count) !== "one" ? "s" : ""}`,
+		);
+
+	const labelPrefix = new Intl.ListFormat("en", { type: "conjunction" }).format(countLabels);
 
 	return (
 		<Toolbox>
 			<ToolboxMeta icon={icon}>
-				<span>
-					{new Intl.NumberFormat().format(checkedAddressCount)} {noun}
-					{new Intl.PluralRules().select(checkedAddressCount) !== "one" && "s"} selected
-				</span>
+				<span>{labelPrefix} selected</span>
 				<ToolboxMetaHint>
 					{formatForDisplaySorted(operationHotkeys.cancel.hotkey)} to close
 				</ToolboxMetaHint>

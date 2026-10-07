@@ -91,8 +91,8 @@ const refreshIntegratedReviews = async (client: QueryClient, projectId: string):
 	});
 
 	const reviewIds = new Set(
-		headInfo.stacks.values().flatMap((stack) =>
-			stack.segments
+		[...headInfo.stacks, ...headInfo.worktrees].values().flatMap((lane) =>
+			lane.segments
 				.values()
 				// Integrated segments only: an open association needs no refresh here, and the landed view
 				// fetches on demand.
@@ -124,8 +124,19 @@ export const handleProjectEvent = (
 	if (payload.type === "gitHead")
 		client.setQueryData([projectId, "operatingMode"], () => payload.subject);
 
-	for (const query of invalidateOn.get(payload.type) ?? [])
-		void client.invalidateQueries({ queryKey: [projectId, query] });
+	for (const query of invalidateOn.get(payload.type) ?? []) {
+		void client.invalidateQueries({
+			queryKey: [projectId, query],
+			// File edits cannot change blob-only diffs. Index events have no paths
+			// and must still refresh everything (e.g. staged attributes).
+			predicate:
+				payload.type === "worktreeChanges" &&
+				Array.isArray(payload.subject.changedPaths) &&
+				payload.subject.changedPaths.length > 0
+					? ({ meta }) => meta?.readsWorktree !== false
+					: undefined,
+		});
+	}
 
 	// Another process's mutation, with the tags it declared: the event table
 	// has nothing to add.

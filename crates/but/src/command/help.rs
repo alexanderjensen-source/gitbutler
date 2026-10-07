@@ -181,7 +181,9 @@ pub(crate) fn grouped_subcommands(cmd: &clap::Command) -> IndexMap<Group, Vec<&c
                 SubcommandDiscriminant::Tui => Group::OtherCommands,
 
                 SubcommandDiscriminant::Edit => continue,
+                #[cfg(feature = "nightly")]
                 SubcommandDiscriminant::_Open => continue,
+                #[cfg(feature = "nightly")]
                 SubcommandDiscriminant::_Expand => continue,
                 SubcommandDiscriminant::Metrics => continue,
                 SubcommandDiscriminant::Onboarding => continue,
@@ -348,7 +350,7 @@ fn print_grouped_with_truncation(
     for (env, desc) in envs::ALL_ENVS {
         let env = format!("  {env}");
         let available_width = terminal_width.saturating_sub(env.len() + 2);
-        let truncated_desc = truncate_text(desc, available_width);
+        let truncated_desc = truncate_text(*desc, available_width);
         writeln!(out, "{env}  {truncated_desc}")?;
     }
 
@@ -446,6 +448,7 @@ Environment variables:
   BUT_OUTPUT_FORMAT  Sets the output format when --json is not passed. Options:…
   BUT_PAGER  Sets the pager for large outputs. [default: less]
   BUT_THEME  Sets the theme for but. Options: dark, light. [default: detected f…
+...
 
 "#]]
         );
@@ -523,6 +526,7 @@ Environment variables:
   BUT_OUTPUT_FORMAT  Sets the output format when --json is not passed. Options:…
   BUT_PAGER  Sets the pager for large outputs. [default: less]
   BUT_THEME  Sets the theme for but. Options: dark, light. [default: detected f…
+...
 
 "#]]
         );

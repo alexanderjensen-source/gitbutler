@@ -9,7 +9,6 @@ use but_core::{
 };
 use but_ctx::Context;
 use but_error::{Code, bail_precondition};
-use but_graph::FirstParent;
 use gitbutler_project::{FetchResult, Project};
 use gitbutler_reference::{Refname, RemoteRefname};
 use gitbutler_repo::first_parent_commit_ids_until;
@@ -232,18 +231,18 @@ pub(crate) fn set_base_branch(
 
     let mut workspace_to_initialize = None;
     if !head_is_workspace {
-        // if there are any commits on the head branch or uncommitted changes in the working directory, we need to
-        // put them into a virtual branch
+        let branch_matches_target = if let Refname::Local(head_name) = &head_name {
+            let upstream_name = target_branch_ref.with_branch(head_name.branch());
+            upstream_name.eq(target_branch_ref)
+        } else {
+            false
+        };
 
+        // Preserve non-target branches even when the entire visible stack is empty.
+        // The target branch only needs a new stack for commits or uncommitted changes.
         let changes = but_core::diff::worktree_changes(&*ctx.repo.get()?)?.changes;
-        if !changes.is_empty() || current_head_commit != target_commit_oid {
-            let branch_matches_target = if let Refname::Local(head_name) = &head_name {
-                let upstream_name = target_branch_ref.with_branch(head_name.branch());
-                upstream_name.eq(target_branch_ref)
-            } else {
-                false
-            };
-
+        if !branch_matches_target || !changes.is_empty() || current_head_commit != target_commit_oid
+        {
             let stack_ref_name = if branch_matches_target {
                 let stack_ref_name = but_core::branch::unique_canned_refname(&repo)?;
                 repo.reference(
@@ -265,6 +264,13 @@ pub(crate) fn set_base_branch(
                 WorkspaceCommitRelation::Merged,
                 |_| StackId::generate(),
             );
+            if !branch_matches_target {
+                // Single-branch mode can already have metadata for the visible branches,
+                // but mark them as outside the workspace. Preserve the entire visible stack,
+                // including empty branches and their ordering, when entering the workspace.
+                let current_workspace = ctx.workspace_from_head_uncached(perm.read_permission())?;
+                current_workspace.reconcile_metadata(&mut workspace)?;
+            }
             meta.set_workspace(&workspace)?;
             drop((workspace, meta));
             if !branch_matches_target {
@@ -311,10 +317,13 @@ pub(crate) fn target_to_base_branch(
 ) -> Result<BaseBranch> {
     let target_ref_name = project_meta.target_ref_or_err()?.clone();
     let target_sha = project_meta.target_commit_id_or_err()?;
-    let target_ref = repo
+    let mut target_ref = repo
         .find_reference(&target_ref_name)
         .context(Code::DefaultTargetNotFound)?;
-    let target_ref_commit_id = target_ref.id().detach();
+    let target_ref_commit_id = target_ref
+        .peel_to_commit()
+        .with_context(|| format!("target '{target_ref_name}' does not point to a commit"))?
+        .id;
 
     // Upstream integration needs to know whether the stored target is ahead of
     // the target ref so the UI can block integration until divergence is resolved.
@@ -323,10 +332,8 @@ pub(crate) fn target_to_base_branch(
     let target_sha_ahead_of_ref = !target_sha_not_ref.is_empty();
 
     // The longest first-parent list of upstream commit ids.
-    let mut upstream_commit_ids = ws
-        .upstream_commits(repo, target_ref_name.as_ref(), FirstParent::Yes)?
+    let mut upstream_commit_ids = upstream_commits_per_stack_head(ws, repo, target_ref_commit_id)?
         .into_iter()
-        .map(|h| h.upstream_commits)
         .max_by_key(|us| us.len())
         .unwrap_or_default();
     if upstream_commit_ids.is_empty() && target_ref_commit_id != target_sha {
@@ -429,6 +436,34 @@ fn first_parent_commit_ids_with_limit(
         .all()?
         .take(limit)
         .map(|info| Ok(info?.id))
+        .collect()
+}
+
+fn upstream_commits_per_stack_head(
+    ws: &but_graph::Workspace,
+    repo: &gix::Repository,
+    target_ref_id: gix::ObjectId,
+) -> Result<Vec<Vec<gix::ObjectId>>> {
+    let mut heads = ws
+        .stacks
+        .iter()
+        .filter_map(|stack| stack.tip_skip_empty())
+        .collect::<Vec<_>>();
+    if heads.is_empty()
+        && let Some(entrypoint_commit) = ws.graph.entrypoint()?.commit()
+    {
+        heads.push(entrypoint_commit.id);
+    }
+    heads
+        .into_iter()
+        .map(|head| {
+            repo.rev_walk([target_ref_id])
+                .with_hidden([head])
+                .first_parent_only()
+                .all()?
+                .map(|info| Ok(info?.id))
+                .collect::<Result<_>>()
+        })
         .collect()
 }
 

@@ -129,6 +129,7 @@ fn main() -> anyhow::Result<()> {
 
                 logs::init(app_handle, &app_log_dir, performance_logging, tokio_debug);
 
+                #[cfg(target_os = "macos")]
                 but_action::cli::auto_fix_broken_but_cli_symlink();
                 inherit_interactive_login_shell_environment_if_not_launched_from_terminal();
                 migrate_projects().ok();
@@ -289,8 +290,6 @@ fn main() -> anyhow::Result<()> {
                 branch::tauri_apply::apply,
                 branch::tauri_get_initial_branch_integration::get_initial_branch_integration,
                 branch::tauri_apply_branch_integration::apply_branch_integration,
-                legacy::stack::tauri_create_branch::create_branch,
-                legacy::stack::tauri_remove_branch::remove_branch,
                 legacy::secret::tauri_secret_get_global::secret_get_global,
                 legacy::secret::tauri_secret_set_global::secret_set_global,
                 legacy::secret::tauri_secret_delete_global::secret_delete_global,

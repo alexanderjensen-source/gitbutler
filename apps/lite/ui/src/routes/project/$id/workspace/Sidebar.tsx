@@ -3,20 +3,20 @@ import { setPage, usePage } from "#ui/use-cursor.ts";
 import { headInfoQueryOptions } from "#ui/api/queries.ts";
 import { NotificationBell } from "#ui/review-inbox-bell.tsx";
 import { stackBottomRelativeTo } from "#ui/api/stack.ts";
-import { Icon } from "#ui/components/Icon.tsx";
-import { TooltipPopup } from "#ui/components/Tooltip.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { Tooltip } from "@gitbutler/ui-react/Tooltip.tsx";
 import { workspaceHotkeys } from "#ui/hotkeys.ts";
 import type { Address } from "#ui/addresses.ts";
 import { projectSlice } from "#ui/projects/state.ts";
 import { interfaceSlice } from "#ui/interface/state.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
 import type { AddressSpace } from "#ui/workspace/address-space.ts";
-import { Button, Toggle, ToggleGroup, Tooltip } from "@base-ui/react";
+import { Button, Toggle, ToggleGroup } from "@base-ui/react";
 import type { BottomUpdate, ProjectForFrontend } from "@gitbutler/but-sdk";
 import { useQuery } from "@tanstack/react-query";
 import { useHotkeys } from "@tanstack/react-hotkeys";
 import { Activity, type FC, useRef } from "react";
-import { ToggleGroupStyles, ToggleStyles } from "#ui/components/ToggleGroup.tsx";
+import { ToggleGroupStyles, ToggleStyles } from "@gitbutler/ui-react/ToggleGroup.tsx";
 import { WorkspaceLists } from "#ui/routes/project/$id/workspace/WorkspaceLists/WorkspaceLists.tsx";
 import type { Graph } from "#ui/routes/project/$id/workspace/Graph/usePlan.ts";
 import { BranchesList } from "#ui/routes/project/$id/workspace/BranchesList.tsx";
@@ -77,6 +77,10 @@ export const Sidebar: FC<{
 
 	const openApplyBranchPicker = () => {
 		dispatch(interfaceSlice.actions.openDialog({ dialog: { _tag: "ApplyBranchPicker" } }));
+	};
+
+	const openOperationsLog = () => {
+		dispatch(interfaceSlice.actions.openDialog({ dialog: { _tag: "OperationsLogPicker" } }));
 	};
 
 	const openSettings = () => {
@@ -189,6 +193,8 @@ export const Sidebar: FC<{
 					bell={<NotificationBell projectId={projectId} />}
 					project={project}
 					isFetchPending={fetchFromRemotes.isPending}
+					canOpenOperationsLog={noOperationPending}
+					onOpenOperationsLog={openOperationsLog}
 					canOpenSettings={noOperationPending}
 					onOpenSettings={openSettings}
 				/>
@@ -238,36 +244,25 @@ export const Sidebar: FC<{
 					absorptionTargetCommitIds={absorptionTargetCommitIds}
 					projectId={projectId}
 					onActiveFileSelection={onActiveFileSelection}
-					newBranch={newBranch}
 					stacksHeaderActions={
 						<RowToolbar forceVisible>
-							<Tooltip.Root>
-								<Tooltip.Trigger
+							<Tooltip
+								content="New branch"
+								// The menu carries both keys; the tooltip names the one that skips it.
+								kbd={workspaceHotkeys.createIndependentBranch.hotkey}
+							>
+								<Button
 									aria-label="New branch"
 									className={getRowButtonClassName({ size: "regular", iconOnly: true })}
 									onClick={(event) => {
 										void showNativeMenuFromTrigger(event.currentTarget, newBranch.menuItems);
 									}}
-									// We pass `disabled` here because we want to disable the button, not
-									// the tooltip. Other props should be passed above.
-									render={<Button focusableWhenDisabled disabled={!canCreateBranch} />}
+									focusableWhenDisabled
+									disabled={!canCreateBranch}
 								>
 									{newBranch.isPending ? <Icon name="spinner" /> : <Icon name="plus" />}
-								</Tooltip.Trigger>
-								<Tooltip.Portal>
-									<Tooltip.Positioner sideOffset={4}>
-										{/* The menu carries both keys; the tooltip names the one that
-										    skips it. */}
-										<Tooltip.Popup
-											render={
-												<TooltipPopup kbd={workspaceHotkeys.createIndependentBranch.hotkey} />
-											}
-										>
-											New branch
-										</Tooltip.Popup>
-									</Tooltip.Positioner>
-								</Tooltip.Portal>
-							</Tooltip.Root>
+								</Button>
+							</Tooltip>
 						</RowToolbar>
 					}
 				/>

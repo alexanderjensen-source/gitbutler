@@ -20,6 +20,17 @@
 	}
 }
 
+/* Starts where a row's own rail would, so it lines up with the rows around it. */
+.railedList {
+	display: flex;
+	padding-inline-start: var(--row-padding-inline-start, 12px);
+
+	& > :last-child {
+		flex-grow: 1;
+		min-width: 0;
+	}
+}
+
 .sectionHeader {
 	display: flex;
 	flex-shrink: 0;
@@ -34,7 +45,7 @@
 	cursor: var(--control-cursor);
 
 	&:where(:hover) {
-		background-color: var(--list-item-hover-bg);
+		background-color: var(--bg-hover);
 	}
 }
 
@@ -55,7 +66,7 @@
    where each one's cursor sits has to stay legible from the other one. What
    separates them is the rail below and the focused fill further down. */
 .containerSelected {
-	background-color: color-mix(var(--fill-gray-bg) var(--opacity-bg-selected-blur), transparent);
+	background-color: var(--bg-selected-inactive);
 
 	/* Only one row in the window is the source of what the details pane shows.
 	   A rail on its leading edge says so even when focus has moved away — into
@@ -76,7 +87,7 @@
 
 	&:has(:is(textarea, input):focus),
 	[data-selection-focus-styles="true"] [data-focus-scope][data-selection-focused="true"] & {
-		background-color: var(--fill-gray-bg);
+		background-color: var(--bg-selected);
 		color: var(--fill-gray-fg);
 	}
 }
@@ -104,16 +115,24 @@
 
 .toolbar {
 	display: none;
+	column-gap: 10px;
+	align-items: center;
+	/* Center buttons of any height within the first row line. */
+	height: var(--single-line-row-height);
+
+	&.toolbarReserveSpace {
+		display: flex;
+		visibility: hidden;
+		flex-shrink: 0;
+	}
 
 	.container:hover &,
 	.container:focus-within &,
 	.containerSelected &,
 	&.toolbarForceVisible {
 		display: flex;
-		column-gap: 10px;
-		align-items: center;
-		/* Center buttons of any height within the first row line. */
-		height: var(--single-line-row-height);
+		/* Hidden rows must also hide their toolbars. */
+		visibility: inherit;
 	}
 
 	button:has([data-icon]) {
@@ -145,7 +164,8 @@
 
 	.container:hover &,
 	.container:focus-within &,
-	.containerSelected & {
+	.containerSelected &,
+	.foldToggle[data-chevron="always"] & {
 		display: flex;
 		position: absolute;
 		align-items: center;
@@ -156,7 +176,7 @@
 		width: 16px;
 		height: var(--single-line-row-height);
 		inset-block-start: 0;
-		inset-inline-start: max(0px, calc(100% - 16px));
+		inset-inline-start: calc(max(0px, calc(100% - 16px)) + var(--row-fold-chevron-offset, 0px));
 		color: var(--text-3);
 	}
 
@@ -170,6 +190,34 @@
 
 .foldGlyph {
 	display: flex;
+
+	/* Clear only the chevron's ink plus six pixels; the connector survives
+	   above and below it, including when the row is hovered. */
+	.foldToggle[data-chevron="always"] & {
+		--graph-segment-glyph-visibility: visible;
+		--chevron-clearance: 6px;
+		--chevron-ink-top: 10.5px;
+		--chevron-ink-bottom: 17px;
+
+		mask-image:
+			linear-gradient(
+				to right,
+				black var(--row-fold-mask-inset, 0px),
+				transparent var(--row-fold-mask-inset, 0px)
+			),
+			linear-gradient(
+				to bottom,
+				black calc(var(--chevron-ink-top) - var(--chevron-clearance)),
+				transparent calc(var(--chevron-ink-top) - var(--chevron-clearance)),
+				transparent calc(var(--chevron-ink-bottom) + var(--chevron-clearance)),
+				black calc(var(--chevron-ink-bottom) + var(--chevron-clearance))
+			);
+	}
+
+	.foldToggle[data-chevron="always"][aria-expanded="false"] & {
+		--chevron-ink-top: 8.5px;
+		--chevron-ink-bottom: 19.5px;
+	}
 
 	/* The indicator takes over the rail from the second line down and draws its
 	   own line around the rings, so this one has to stop at the glyph rather
@@ -220,6 +268,7 @@
 	align-items: center;
 	min-width: 0;
 	margin-right: 2px;
+	margin-inline-start: var(--row-label-offset, 0px);
 	padding-block: var(--single-line-row-label-padding-block);
 }
 
@@ -241,14 +290,18 @@
 	display: flex;
 	align-items: center;
 	gap: 6px;
+
+	&:has(> .metaButton ~ .metaButton) {
+		flex-wrap: wrap;
+	}
 }
 
 .metaItem {
 	display: flex;
 	flex-shrink: 0;
 	align-items: center;
-	/* Small buttons are tag-sized; matching them prevents layout shift when they appear/disappear. */
-	height: var(--size-tag);
+	/* A small button's height, so the row does not shift when one appears or disappears. */
+	height: var(--size-control-sm);
 	gap: 4px;
 }
 
@@ -315,9 +368,8 @@
 
 		--button-border: none;
 		--button-bg: transparent;
-		--button-fg: color-mix(in srgb, var(--text-1-invert) 90%, transparent);
-		--button-hover-fg: var(--text-1-invert);
-		--button-hover-bg: color-mix(in srgb, var(--scale-gray-100) 5%, transparent);
+		--button-fg: var(--text-1-invert);
+		--button-hover-bg: var(--bg-hover-invert);
 	}
 }
 
@@ -332,9 +384,8 @@
 
 		--button-border: 1px solid color-mix(in srgb, var(--fill-gray-fg) 30%, transparent);
 		--button-bg: transparent;
-		--button-fg: color-mix(in srgb, var(--text-1-invert) 90%, transparent);
-		--button-hover-fg: var(--text-1-invert);
-		--button-hover-bg: color-mix(in srgb, var(--scale-gray-100) 5%, transparent);
+		--button-fg: var(--text-1-invert);
+		--button-hover-bg: var(--bg-hover-invert);
 	}
 }
 

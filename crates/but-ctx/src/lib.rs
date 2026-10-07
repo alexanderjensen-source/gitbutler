@@ -546,6 +546,11 @@ impl Context {
 
 /// Trampolines that create new uncached instances of major types.
 impl Context {
+    /// Invalidates the workspace cache, if it is present.
+    pub fn invalidate_workspace(&mut self, _perm: &mut RepoExclusive) {
+        self.workspace.take();
+    }
+
     /// Create a cached workspace as seen from the current HEAD for editing, and return it,
     /// along with `(guard, &mut repo, &mut ws, &mut db)`.
     /// The guard ensures exclusive process-wide access to the repository.
@@ -1076,7 +1081,7 @@ fn open_repo(gitdir: &Path, repo_open_mode: RepoOpenMode) -> anyhow::Result<gix:
 fn new_ondemand_git2_repo(gitdir: PathBuf) -> OnDemand<git2::Repository> {
     OnDemand::new({
         let gitdir = gitdir.clone();
-        move || git2::Repository::open(&gitdir).map_err(Into::into)
+        move || but_oxidize::open_git2_repo(&gitdir)
     })
 }
 

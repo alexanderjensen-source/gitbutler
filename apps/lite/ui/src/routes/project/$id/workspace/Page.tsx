@@ -28,7 +28,8 @@ import {
 import { projectSlice } from "#ui/projects/state.ts";
 import { useParams } from "@tanstack/react-router";
 import { interfaceSlice } from "#ui/interface/state.ts";
-import { ResizeHandle } from "#ui/components/ResizeHandle.tsx";
+import { diffFileSpacing } from "@gitbutler/ui-react/diffFileLayout.ts";
+import { ResizeHandle } from "@gitbutler/ui-react/ResizeHandle.tsx";
 import { globalHotkeys, workspaceHotkeys } from "#ui/hotkeys.ts";
 import { useAppDispatch, useAppSelector, useAppStore } from "#ui/store.ts";
 import { useHotkey, useHotkeys, type UseHotkeyDefinition } from "@tanstack/react-hotkeys";
@@ -75,7 +76,7 @@ import { OperationsLogPicker } from "./OperationsLogPicker.tsx";
 import { DetailsPlaceholder } from "./DetailsPlaceholder.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { OperationControls } from "#ui/routes/project/$id/workspace/OperationControls.tsx";
-import { ErrorBoundary } from "#ui/components/ErrorBoundary.tsx";
+import { ErrorBoundary } from "@gitbutler/ui-react/ErrorBoundary.tsx";
 import { Settings } from "./Settings/Settings.tsx";
 import { BranchUpdateDialog } from "./BranchUpdatePanel.tsx";
 import { useBranchesList } from "./useBranchesList.ts";
@@ -298,20 +299,25 @@ const PageBody: FC<{ projectId: string }> = ({ projectId }) => {
 	// to bypass that latter file selection. We could alternatively attempt to pad the scroll
 	// container, but that comes with other complexities and tradeoffs.
 	const didScrollToViaFileRef = useRef(false);
+	// A selected file the viewer has no item for yet; Details scrolls to it once its diff streams in.
+	const pendingFileRef = useRef<FileAddress | null>(null);
 
 	// useCallback, not compiler memoisation: the deferred details element below
 	// keys on this identity, so it must be stable by construction.
 	const onActiveFileSelection = useCallback(
 		(file: FileAddress) => {
 			setCursor("diff", { file, range: null });
+			pendingFileRef.current = null;
 
 			if (renderAllFiles) {
 				const itemId = weakFileIdentityKey(file);
-				didScrollToViaFileRef.current = true;
 				const viewer = viewerRef.current?.getInstance();
 				// Details selection is deferred, so the ref may still point at a viewer without this file.
-				if (!viewer?.getItem(itemId)) return;
-
+				if (!viewer?.getItem(itemId)) {
+					pendingFileRef.current = file;
+					return;
+				}
+				didScrollToViaFileRef.current = true;
 				viewer.scrollTo({
 					type: "item",
 					id: itemId,
@@ -491,10 +497,16 @@ const PageBody: FC<{ projectId: string }> = ({ projectId }) => {
 	// A commit on the target line, selected anywhere in the graph, carries the review it landed.
 	const appliedReview =
 		appliedSelection?._tag === "Commit"
-			? targetCommitReview(graph.listing, appliedSelection.commitId)
+			? targetCommitReview(graph.listing, appliedSelection.commitId, graph.plan.history)
 			: null;
 	const details = useMemo(() => {
-		const viewProps = { projectId, onActiveFileSelection, viewerRef, didScrollToViaFileRef };
+		const viewProps = {
+			projectId,
+			onActiveFileSelection,
+			viewerRef,
+			didScrollToViaFileRef,
+			pendingFileRef,
+		};
 
 		// Each workspace list's details, null while its cursor is: a cursor is
 		// null only when its list is empty, and an empty list has nothing to give.
@@ -620,7 +632,7 @@ const PageBody: FC<{ projectId: string }> = ({ projectId }) => {
 				{...selectionFocus}
 				id={layoutId}
 				className={styles.page}
-				// The handle's own box is the grab area; see ResizeHandle's grab="after".
+				// The gap between the panels is the grab area, not the panels' edges.
 				resizeTargetMinimumSize={{ coarse: 1, fine: 1 }}
 				defaultLayout={workspaceLayout.defaultLayout}
 				onLayoutChanged={workspaceLayout.onLayoutChanged}
@@ -653,12 +665,18 @@ const PageBody: FC<{ projectId: string }> = ({ projectId }) => {
 							/>
 						</ErrorBoundary>
 					</Panel>
-					<ResizeHandle grab="after" />
+					<ResizeHandle gap />
 				</Activity>
 
 				<Panel
 					id={"details-panel" satisfies PanelId}
 					className={styles.panel}
+					// The diff's file spacing, shared with every app through ui-react, for
+					// the details view's toolbar and its diff to line up by.
+					style={{
+						"--diff-file-inset": `${diffFileSpacing.inset}px`,
+						"--diff-file-top": `${diffFileSpacing.top}px`,
+					}}
 					data-focus-scope={"details" satisfies FocusScope}
 				>
 					{/* Keyed on the deferred view itself, not on the URL: the deferred

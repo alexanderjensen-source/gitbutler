@@ -482,13 +482,8 @@ where
 
     /// Restack `source_branch` on top of `target_branch` within the transaction's workspace.
     ///
-    /// Transactions operate on managed workspaces only. The ad-hoc (single-branch) move path is the
-    /// one that populates [`Outcome::new_tip`] and [`Outcome::branch_stack_order`] for the caller to
-    /// apply, and `RecordingMetadata` can't persist branch stack order anyway, so we bail if either
-    /// field is ever set rather than silently dropping a metadata reorder or a required checkout.
-    ///
-    /// [`Outcome::new_tip`]: but_workspace::branch::move_branch::Outcome::new_tip
-    /// [`Outcome::branch_stack_order`]: but_workspace::branch::move_branch::Outcome::branch_stack_order
+    /// In single-branch mode, record the reordered branches and defer checkout of the new tip
+    /// until the transaction is materialized, just like reference creation.
     pub fn stack_branch_on(
         &mut self,
         source_branch: &FullNameRef,
@@ -503,26 +498,34 @@ where
             ))
         })?;
 
-        anyhow::ensure!(
-            new_tip.is_none() && branch_stack_order.is_none(),
-            "Ad-hoc (single-branch) branch moves are not supported inside transactions"
-        );
-
+        if let Some(branches) = branch_stack_order {
+            self.inner
+                .pending_metadata_updates
+                .push(PendingMetadataUpdate::BranchStackOrder(branches));
+        }
+        if let Some(new_tip) = new_tip {
+            self.checkout(new_tip.as_ref())?;
+        }
         self.record_workspace_metadata_update(ws_meta)?;
 
         Ok(())
     }
 
     pub fn tear_off_branch(&mut self, source_branch: &FullNameRef) -> anyhow::Result<()> {
-        let ws_meta = self.rebase(|editor, _| {
+        let (ws_meta, branch_stack_order) = self.rebase(|editor, _| {
             let outcome = but_workspace::branch::tear_off_branch(editor, source_branch, None)?;
             Ok((
-                outcome.ws_meta,
+                (outcome.ws_meta, outcome.branch_stack_order),
                 MaterializeWithoutCheckout::No,
                 outcome.rebase,
             ))
         })?;
 
+        if let Some(branches) = branch_stack_order {
+            self.inner
+                .pending_metadata_updates
+                .push(PendingMetadataUpdate::BranchStackOrder(branches));
+        }
         self.record_workspace_metadata_update(ws_meta)?;
 
         Ok(())
@@ -560,6 +563,51 @@ where
         Ok(())
     }
 
+    /// Create a new local branch at a commit already present in the editor.
+    ///
+    /// Unlike [`Transaction::create_reference`], this does not add the branch to workspace
+    /// metadata or require it to appear in the current checkout's projection. It can be used
+    /// with [`Transaction::checkout`] to prepare an independent branch before switching to it.
+    /// The reference is available to subsequent operations and is removed on rollback or dry run.
+    pub fn create_reference_at_commit(
+        &mut self,
+        ref_name: &FullNameRef,
+        commit_id: ObjectId,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            ref_name.category() == Some(gix::refs::Category::LocalBranch),
+            "Can only create local branches under refs/heads"
+        );
+        let commit_id = self.inner.commit_mappings.map(commit_id);
+        self.repo().reference(
+            ref_name,
+            commit_id,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            format!("create {ref_name}"),
+        )?;
+        self.inner
+            .pending_ref_changes
+            .record_eager_create(ref_name, None);
+        // Preserve GitButler-created branch identity, including when it later becomes empty,
+        // without recording a stack relationship with the branch owning the base commit.
+        let mut branch = ref_metadata::Branch::default();
+        branch.update_times(true);
+        self.inner
+            .pending_metadata_updates
+            .push(PendingMetadataUpdate::Branch(RecordingMetadataHandle {
+                name: ref_name.to_owned(),
+                value: branch,
+                is_default: false,
+            }));
+
+        self.rebase(|mut editor, _| {
+            let target = editor.select_commit(commit_id)?;
+            let reference = editor.add_step(Step::new_reference(ref_name.to_owned()))?;
+            editor.add_edge(reference, target, 0)?;
+            Ok(((), MaterializeWithoutCheckout::No, editor.rebase()?))
+        })
+    }
+
     pub fn create_reference<'name>(
         &mut self,
         ref_name: &FullNameRef,
@@ -587,8 +635,7 @@ where
                 ref_name,
                 position,
             }) => {
-                let (_, segment) =
-                    workspace.try_find_segment_and_stack_by_refname(ref_name.as_ref())?;
+                let segment = workspace.try_find_segment_by_refname(ref_name.as_ref())?;
                 if matches!(
                     position,
                     but_workspace::branch::create_reference::Position::Below

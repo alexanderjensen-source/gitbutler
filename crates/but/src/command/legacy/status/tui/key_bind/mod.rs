@@ -5,12 +5,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use strum::IntoEnumIterator;
 
 use crate::{
-    CliId,
+    ChangeSourceId, CliId,
     command::legacy::status::tui::{
         CommandMessage, ConfirmMessage, DetailsLayoutMessage, FuzzyPickerMessage, JumpMessage,
         Message, StackMessage,
         app::{
             BranchMessage, CherryPickMessage, CommitMessageComposer, RewordMessage, SquashMessage,
+            WorktreeMessage,
         },
         details::DetailsMessage,
         help::HelpMessage,
@@ -32,7 +33,7 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
         let mut builder = key_binds.for_modes([mode]);
         match mode {
             ModeDiscriminant::Normal => {
-                register_normal_mode_key_binds(&mut builder, true);
+                register_normal_mode_key_binds(&mut builder, true, feature_flags);
             }
             ModeDiscriminant::PickChanges => {
                 builder.mark().register();
@@ -44,7 +45,6 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
                 builder.squash_use_target_message().register();
                 builder.switch_to_commit_mode().register();
                 builder.switch_to_move_mode().register();
-                builder.switch_to_branch_mode().register();
                 register_non_mode_specific_key_binds(&mut builder, WithFocusDetails::No);
             }
             ModeDiscriminant::Commit => {
@@ -59,8 +59,8 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
             ModeDiscriminant::Move => {
                 builder.move_confirm().register();
                 builder.move_toggle_insert_side().register();
+                builder.move_to_new_branch().register();
                 builder.switch_to_squash_mode().register();
-                builder.switch_to_branch_mode().register();
                 register_non_mode_specific_key_binds(&mut builder, WithFocusDetails::No);
             }
             ModeDiscriminant::Stack => {
@@ -89,9 +89,19 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
                 builder.branch_toggle_insert_side().register();
                 builder.discard().register();
                 builder.mark().register();
-                builder.switch_to_squash_mode().register();
-                builder.switch_to_move_mode().register();
                 register_non_mode_specific_key_binds(&mut builder, WithFocusDetails::No);
+            }
+            ModeDiscriminant::Worktree => {
+                if feature_flags.worktree_manipulation {
+                    builder.worktree_new().register();
+                    builder.worktree_archive().register();
+                    builder.worktree_unarchive().register();
+                    builder
+                        .discard()
+                        .long_description("Discard worktree")
+                        .register();
+                    register_non_mode_specific_key_binds(&mut builder, WithFocusDetails::No);
+                }
             }
             ModeDiscriminant::Details => {
                 builder
@@ -126,6 +136,7 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
                 builder.details_jump_down().register();
 
                 builder.details_copy().register();
+                builder.copy_picker().register();
                 builder.details_top().register();
                 builder.details_bottom().register();
                 builder.toggle_full_screen_details().register();
@@ -140,6 +151,8 @@ pub fn default_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
                 builder.grow_details().register();
                 builder.shrink_details().register();
                 builder.details_focus_status().register();
+
+                builder.undo().register();
 
                 builder.command().register();
                 builder.shell_command().register();
@@ -335,12 +348,12 @@ pub fn help_key_binds() -> KeyBinds {
     key_binds
 }
 
-pub fn normal_with_marks_key_binds() -> KeyBinds {
+pub fn normal_with_marks_key_binds(feature_flags: &FeatureFlags) -> KeyBinds {
     let mut key_binds = KeyBinds::new();
 
     let mut builder = key_binds.for_modes(Vec::from([ModeDiscriminant::Normal]));
 
-    register_normal_mode_key_binds(&mut builder, false);
+    register_normal_mode_key_binds(&mut builder, false, feature_flags);
 
     key_binds
 }
@@ -503,6 +516,28 @@ impl KeyBindsBuilder<'_> {
         .show_only_in_normal_mode_help_section()
     }
 
+    fn scroll_status_down(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind(
+            "scroll down",
+            press().control().code(KeyCode::Char('e')),
+            || Message::StatusScroll(1),
+        )
+        .hide_from_hotbar()
+        .show_only_in_normal_mode_help_section()
+        .long_description("Scroll status viewport down one line")
+    }
+
+    fn scroll_status_up(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind(
+            "scroll up",
+            press().control().code(KeyCode::Char('y')),
+            || Message::StatusScroll(-1),
+        )
+        .hide_from_hotbar()
+        .show_only_in_normal_mode_help_section()
+        .long_description("Scroll status viewport up one line")
+    }
+
     const JUMP_DISTANCE: usize = 10;
 
     fn jump_up(&mut self) -> KeyBindsInModesBuilder<'_> {
@@ -637,8 +672,8 @@ impl KeyBindsBuilder<'_> {
     }
 
     fn uncommitted_area(&mut self) -> KeyBindsInModesBuilder<'_> {
-        self.key_bind("goto uncommitted", press().code(KeyCode::Char('g')), || {
-            Message::SelectUncommitted
+        self.key_bind("goto top", press().code(KeyCode::Char('g')), || {
+            Message::GotoTop
         })
         .hide_from_hotbar()
         .show_only_in_normal_mode_help_section()
@@ -646,9 +681,9 @@ impl KeyBindsBuilder<'_> {
 
     fn merge_base(&mut self) -> KeyBindsInModesBuilder<'_> {
         self.key_bind(
-            "goto merge base",
+            "goto bottom",
             press().shift().code(KeyCode::Char('G')),
-            || Message::SelectMergeBase,
+            || Message::GotoBottom,
         )
         .hide_from_hotbar()
         .show_only_in_normal_mode_help_section()
@@ -725,6 +760,15 @@ impl KeyBindsBuilder<'_> {
         .long_description("Toggle moving above or below")
     }
 
+    fn move_to_new_branch(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind(
+            "move to new branch",
+            press().code(KeyCode::Char('b')),
+            || Message::Move(MoveMessage::MoveToNewBranch),
+        )
+        .long_description("Move to a new branch above")
+    }
+
     fn branch(&mut self) -> KeyBindsInModesBuilder<'_> {
         self.key_bind("branch", press().code(KeyCode::Char('b')), || {
             Message::Branch(BranchMessage::Start)
@@ -734,9 +778,37 @@ impl KeyBindsBuilder<'_> {
 
     fn stack(&mut self) -> KeyBindsInModesBuilder<'_> {
         self.key_bind("stack", press().code(KeyCode::Char('s')), || {
-            Message::Stack(StackMessage::Enter)
+            Message::Stack(StackMessage::Start)
         })
         .long_description("Enter stack mode")
+    }
+
+    fn worktree(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind("worktree", press().code(KeyCode::Char('w')), || {
+            Message::Worktree(WorktreeMessage::Start)
+        })
+        .long_description("Enter worktree mode")
+    }
+
+    fn worktree_new(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind("new", press().code(KeyCode::Char('n')), || {
+            Message::Worktree(WorktreeMessage::New)
+        })
+        .long_description("Create new worktree")
+    }
+
+    fn worktree_archive(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind("archive", press().code(KeyCode::Char('a')), || {
+            Message::Worktree(WorktreeMessage::Archive)
+        })
+        .long_description("Archive worktree")
+    }
+
+    fn worktree_unarchive(&mut self) -> KeyBindsInModesBuilder<'_> {
+        self.key_bind("unarchive", press().code(KeyCode::Char('u')), || {
+            Message::Worktree(WorktreeMessage::ShowUnarchivePicker)
+        })
+        .long_description("Unarchive worktree")
     }
 
     fn focus_details(&mut self) -> KeyBindsInModesBuilder<'_> {
@@ -1145,19 +1217,21 @@ impl KeyBindsBuilder<'_> {
     fn switch_to_squash_mode(&mut self) -> KeyBindsInModesBuilder<'_> {
         self.squash().hide_from_help().hide_from_hotbar()
     }
-
-    fn switch_to_branch_mode(&mut self) -> KeyBindsInModesBuilder<'_> {
-        self.branch().hide_from_help().hide_from_hotbar()
-    }
 }
 
-fn register_normal_mode_key_binds(builder: &mut KeyBindsBuilder<'_>, without_marks: bool) {
+fn register_normal_mode_key_binds(
+    builder: &mut KeyBindsBuilder<'_>,
+    without_marks: bool,
+    feature_flags: &FeatureFlags,
+) {
     builder.up().register();
     builder.down().register();
     builder.next_section().register();
     builder.prev_section().register();
     builder.jump_up().register();
     builder.jump_down().register();
+    builder.scroll_status_down().register();
+    builder.scroll_status_up().register();
 
     builder.commit().register();
 
@@ -1176,6 +1250,9 @@ fn register_normal_mode_key_binds(builder: &mut KeyBindsBuilder<'_>, without_mar
     builder.branch().register();
     if without_marks {
         builder.stack().register();
+        if feature_flags.worktree_manipulation {
+            builder.worktree().register();
+        }
     }
 
     builder.cherry_pick().register();
@@ -1237,6 +1314,8 @@ fn register_non_mode_specific_key_binds(
     builder.prev_section().register();
     builder.jump_up().register();
     builder.jump_down().register();
+    builder.scroll_status_down().register();
+    builder.scroll_status_up().register();
     builder.toggle_details().register();
     builder.toggle_full_screen_details().register();
 
@@ -1505,7 +1584,17 @@ impl KeyMatcher {
             return false;
         }
 
-        if self.modifiers != ev.modifiers {
+        // Shifted symbols like `?` or `:` already encode shift in the character, but some
+        // platforms (e.g. Windows) still report the SHIFT modifier while others don't.
+        let mut ev_modifiers = ev.modifiers;
+        if let KeyCode::Char(c) = ev.code
+            && !c.is_lowercase()
+            && !c.is_uppercase()
+        {
+            ev_modifiers.remove(KeyModifiers::SHIFT);
+        }
+
+        if self.modifiers != ev_modifiers {
             return false;
         }
 
@@ -1586,15 +1675,21 @@ impl KeyBindCondition {
                     return false;
                 };
                 match selection {
-                    CliId::UncommittedHunkOrFile(..) | CliId::Uncommitted { .. } => true,
+                    CliId::UncommittedHunkOrFile(..)
+                    | CliId::UncommittedArea {
+                        source: ChangeSourceId::Head,
+                        ..
+                    } => true,
                     CliId::AnonymousSegment(..)
                     | CliId::PathPrefix { .. }
                     | CliId::CommittedFile { .. }
                     | CliId::CommittedHunk { .. }
                     | CliId::Branch(..)
                     | CliId::Commit { .. }
-                    | CliId::Worktree { .. }
-                    | CliId::WorktreeUncommitted { .. }
+                    | CliId::UncommittedArea {
+                        source: ChangeSourceId::Worktree(_),
+                        ..
+                    }
                     | CliId::Stack { .. } => false,
                 }
             }

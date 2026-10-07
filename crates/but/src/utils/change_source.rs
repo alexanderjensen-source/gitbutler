@@ -5,12 +5,51 @@
 //! checkout, so [`ChangeSourceId`] is what keeps them apart. This module owns that
 //! concept end to end; `crate::id` only mints the IDs.
 
+use std::path::Path;
+
 use bstr::{BStr, BString};
 use but_ctx::Context;
 use but_workspace::commit::ChangeSource;
 use nonempty::NonEmpty;
 
-use crate::{CliResult, bad_input, id::UncommittedHunkOrFile};
+use crate::{CliResult, IdMap, bad_input, id::UncommittedHunkOrFile};
+
+/// The checkout `but` was invoked from, which a command falls back to when no location is named.
+///
+/// It is not yet a [`ChangeSourceId`]: that needs GitButler to manage the checkout, which
+/// [`Self::managed_source`] checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvokedFrom {
+    MainWorktree,
+    LinkedWorktree(BString),
+}
+
+impl InvokedFrom {
+    pub fn discover(directory: &Path) -> anyhow::Result<Self> {
+        let repo = gix::discover(directory)?;
+        let name = repo
+            .worktree()
+            .and_then(|worktree| worktree.id().map(ToOwned::to_owned));
+        Ok(name.map_or(Self::MainWorktree, Self::LinkedWorktree))
+    }
+
+    /// Errors when this is a linked worktree GitButler doesn't manage, as acting on the main
+    /// worktree instead would touch changes the user isn't looking at.
+    pub fn managed_source(&self, id_map: &IdMap) -> CliResult<ChangeSourceId> {
+        let name = match self {
+            InvokedFrom::MainWorktree => return Ok(ChangeSourceId::Head),
+            InvokedFrom::LinkedWorktree(name) => name,
+        };
+        if id_map.worktree_lane(name.as_ref()).is_none() {
+            return Err(
+                bad_input(format!("Worktree {name} is not managed by GitButler"))
+                    .hint("Run `but worktree list` to see the worktrees GitButler manages")
+                    .into(),
+            );
+        }
+        Ok(ChangeSourceId::Worktree(name.clone()))
+    }
+}
 
 /// The checkout that an uncommitted change lives in.
 ///
@@ -58,10 +97,8 @@ impl ChangeSourceId {
 pub struct SourceChanges {
     /// The checkout these were read from.
     pub source: ChangeSourceId,
-    /// The changed files, which carry the tree status that hunks do not.
-    pub changes: Vec<but_core::ui::TreeChange>,
     /// The hunks those changes split into.
-    pub hunks: Vec<but_core::SingleHunk>,
+    pub changes_with_hunks: Vec<(but_core::TreeChange, NonEmpty<but_core::SingleHunk>)>,
 }
 
 /// The names of the linked worktrees whose uncommitted changes get CLI IDs.
@@ -119,20 +156,19 @@ pub fn changes_by_source(
     head_changes: Vec<but_core::ui::TreeChange>,
 ) -> anyhow::Result<Vec<SourceChanges>> {
     let mut out = Vec::with_capacity(worktree_names.len() + 1);
-    let head_hunks = but_core::hunks_from_changes(repo, head_changes.clone(), context_lines);
+    let head_changes_with_hunks = but_core::changes_with_hunks(repo, head_changes, context_lines);
     out.push(SourceChanges {
         source: ChangeSourceId::Head,
-        changes: head_changes,
-        hunks: head_hunks,
+        changes_with_hunks: head_changes_with_hunks.collect(),
     });
     for name in worktree_names {
         let wt_repo = but_workspace::worktrees::open_worktree_repo(repo, name.as_ref())?;
         let changes = but_core::diff::ui::worktree_changes(&wt_repo)?.changes;
-        let hunks = but_core::hunks_from_changes(&wt_repo, changes.clone(), context_lines);
+        let changes_with_hunks =
+            but_core::changes_with_hunks(&wt_repo, changes, context_lines).collect();
         out.push(SourceChanges {
             source: ChangeSourceId::Worktree(name),
-            changes,
-            hunks,
+            changes_with_hunks,
         });
     }
     Ok(out)

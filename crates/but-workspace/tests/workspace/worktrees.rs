@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use bstr::{BStr, ByteSlice};
+use but_core::RefMetadata as _;
 use but_graph::Graph;
+use but_workspace::branch::create_reference::{Anchor, Position::*};
 use but_workspace::ref_info::LocalCommitRelation;
 use but_workspace::ui::PushStatus;
 use but_workspace::worktrees::WorktreeBase;
@@ -16,6 +18,20 @@ fn ref_info_with_worktree_tips(
     repo: &gix::Repository,
     meta: &impl but_core::RefMetadata,
 ) -> Result<but_workspace::RefInfo> {
+    but_workspace::graph_to_ref_info(
+        &workspace_with_worktree_tips(repo, meta)?,
+        repo,
+        but_workspace::ref_info::Options {
+            expensive_commit_info: true,
+            ..Default::default()
+        },
+    )
+}
+
+fn workspace_with_worktree_tips(
+    repo: &gix::Repository,
+    meta: &impl but_core::RefMetadata,
+) -> Result<but_graph::Workspace> {
     let project_meta = but_core::ref_metadata::ProjectMeta {
         target_ref: Some("refs/remotes/origin/main".try_into()?),
         target_commit_id: Some(repo.rev_parse_single("main")?.detach()),
@@ -35,14 +51,7 @@ fn ref_info_with_worktree_tips(
         },
     )?
     .validated()?;
-    but_workspace::graph_to_ref_info(
-        &graph.into_workspace()?,
-        repo,
-        but_workspace::ref_info::Options {
-            expensive_commit_info: true,
-            ..Default::default()
-        },
-    )
+    graph.into_workspace()
 }
 
 #[test]
@@ -233,6 +242,75 @@ fn worktrees_are_projected_onto_the_workspace() -> Result<()> {
 }
 
 #[test]
+fn lane_chains_follow_what_worktrees_rest_on() -> Result<()> {
+    let (repo, _tmp) = writable_scenario_slow("worktree-workspace");
+    let mut meta = but_meta::VirtualBranchesTomlMetadata::from_path(
+        repo.path().join("should-never-be-written.toml"),
+    )?;
+    add_workspace(&mut meta);
+    add_stack(&mut meta, 1, "A", StackState::InWorkspace);
+    add_stack(&mut meta, 2, "B", StackState::InWorkspace);
+    let info = ref_info_with_worktree_tips(&repo, &meta)?;
+
+    let chain = |branch: &str| -> Vec<Vec<String>> {
+        let branch = gix::refs::Category::LocalBranch
+            .to_full_name(branch)
+            .expect("valid fixture branch name");
+        info.lane_chain(branch.as_ref())
+            .into_iter()
+            .map(|(lane, index)| {
+                lane.segments_from(index)
+                    .iter()
+                    .map(|segment| {
+                        segment
+                            .ref_name()
+                            .map_or("<anon>".to_string(), |name| name.shorten().to_string())
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let lanes = |lanes: &[&[&str]]| -> Vec<Vec<String>> {
+        lanes
+            .iter()
+            .map(|lane| lane.iter().map(|s| s.to_string()).collect())
+            .collect()
+    };
+
+    assert_eq!(chain("A"), lanes(&[&["A"]]), "a stack rests on the target");
+    assert_eq!(
+        chain("wt-outside"),
+        lanes(&[&["wt-outside"]]),
+        "a worktree based on the target rests on nothing"
+    );
+    assert_eq!(
+        chain("disjoint"),
+        lanes(&[&["disjoint"]]),
+        "unrelated history has nothing beneath it"
+    );
+    assert_eq!(
+        chain("wt-stacked"),
+        lanes(&[&["wt-stacked"], &["wt-inside"], &["A"]]),
+        "a worktree on a worktree on a stack walks through both"
+    );
+    assert_eq!(
+        chain("top"),
+        lanes(&[&["top", "mid"], &["<anon>"], &["A"]]),
+        "the chain enters the detached worktree at its anonymous segment"
+    );
+    assert_eq!(
+        chain("mid"),
+        lanes(&[&["mid"], &["<anon>"], &["A"]]),
+        "a lower branch of a worktree stack starts its chain at its own segment"
+    );
+    assert!(
+        chain("nope").is_empty(),
+        "a branch outside every lane has no chain"
+    );
+    Ok(())
+}
+
+#[test]
 fn worktrees_are_empty_without_seeded_tips() -> Result<()> {
     let mut db = but_testsupport::in_memory_db();
     let (repo, _tmp) = writable_scenario_slow("worktree-workspace");
@@ -322,6 +400,198 @@ fn remove_defers_to_git_for_dirty_checkouts() -> Result<()> {
     assert!(
         repo.worktree_proxy_by_id(BStr::new("wt-a")).is_none(),
         "the administrative files are gone too"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_checks_out_a_new_branch_at_the_base_and_names_the_worktree_after_the_path() -> Result<()> {
+    let (repo, _tmp) = writable_scenario_slow("worktree-listing");
+    let base = repo.head_id()?.detach();
+    let path = repo.common_dir().join("gb-wts").join("wt-new");
+    let branch: &gix::refs::FullNameRef = "refs/heads/wt-new".try_into()?;
+
+    let name = but_workspace::worktrees::add(&repo, &path, branch, base)?;
+    assert_eq!(
+        name, "wt-new",
+        "git names the worktree after the last path component"
+    );
+    assert_eq!(
+        repo.worktree_proxy_by_id(name.as_bstr())
+            .expect("registered")
+            .base()?,
+        gix::path::realpath(&path)?
+    );
+    assert_eq!(
+        repo.find_reference(branch)?.peel_to_id()?.detach(),
+        base,
+        "the new branch starts where it was told to"
+    );
+
+    let err = but_workspace::worktrees::add(&repo, &path, branch, base).unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn references_can_be_created_at_commits_of_worktree_lanes() -> Result<()> {
+    let (repo, _tmp) = writable_scenario_slow("worktree-workspace");
+    let mut meta = but_meta::VirtualBranchesTomlMetadata::from_path(
+        repo.path().join("virtual-branches.toml"),
+    )?;
+    add_workspace(&mut meta);
+    add_stack(&mut meta, 1, "A", StackState::InWorkspace);
+    add_stack(&mut meta, 2, "B", StackState::InWorkspace);
+    let ws = workspace_with_worktree_tips(&repo, &meta)?;
+    snapbox::assert_data_eq!(
+        but_testsupport::graph_workspace(&ws).to_string(),
+        snapbox::str![[r#"
+📕🏘️:gitbutler/workspace[🌳@repo] <> ✓refs/remotes/origin/main on cad9051
+├── ≡📙:A on cad9051 {1}
+│   └── 📙:A
+│       ├── ·19f4fc0 (🏘️)
+│       └── ·0a62dfe (🏘️)
+├── ≡📙:B on cad9051 {2}
+│   └── 📙:B
+│       └── ·5881e28 (🏘️)
+├── 📁wt-at on 19f4fc0 (🏘️)
+│   └── 📙:anon:
+├── 📁wt-below on d4d66e2
+│   └── :wt-below[📁]
+│       └── ·53aafe9
+├── 📁wt-disjoint
+│   └── :disjoint[📁wt-disjoint]
+│       └── ·3c0fa35
+├── 📁wt-inside on 0a62dfe (🏘️)
+│   └── :wt-inside[📁]
+│       └── ·6a13321
+├── 📁wt-mid on 0a62dfe (🏘️)
+│   └── :anon:
+│       └── ·0bc05bf
+├── 📁wt-outside on cad9051
+│   └── :wt-outside[📁]
+│       └── ·4fcfc93
+├── 📁wt-pushed on cad9051
+│   └── :wt-pushed[📁] <> origin/wt-pushed⇡1
+│       ├── ·198b592
+│       └── ❄️88c9775
+├── 📁wt-stacked on 6a13321 (🏘️)
+│   └── :wt-stacked[📁]
+│       └── ·fc6f8f5
+└── 📁wt-top on 0bc05bf (🏘️)
+    ├── :top[📁wt-top]
+    │   └── ·d175c00
+    └── :mid
+        └── ·b743926
+
+"#]]
+    );
+
+    let p1 = repo.rev_parse_single("wt-pushed~1")?.detach();
+    let ws = but_workspace::branch::create_reference(
+        crate::utils::r("refs/heads/below-pushed"),
+        Anchor::AtCommit {
+            commit_id: p1,
+            position: Above,
+        },
+        &repo,
+        &ws,
+        &mut meta,
+        |_| unreachable!("worktree lanes have no stack"),
+        None,
+    )?;
+    snapbox::assert_data_eq!(
+        but_testsupport::graph_workspace(&ws).to_string(),
+        snapbox::str![[r#"
+📕🏘️:gitbutler/workspace[🌳@repo] <> ✓refs/remotes/origin/main on cad9051
+├── ≡📙:A on cad9051 {1}
+│   └── 📙:A
+│       ├── ·19f4fc0 (🏘️)
+│       └── ·0a62dfe (🏘️)
+├── ≡📙:B on cad9051 {2}
+│   └── 📙:B
+│       └── ·5881e28 (🏘️)
+├── 📁wt-at on 19f4fc0 (🏘️)
+│   └── 📙:anon:
+├── 📁wt-below on d4d66e2
+│   └── :wt-below[📁]
+│       └── ·53aafe9
+├── 📁wt-disjoint
+│   └── :disjoint[📁wt-disjoint]
+│       └── ·3c0fa35
+├── 📁wt-inside on 0a62dfe (🏘️)
+│   └── :wt-inside[📁]
+│       └── ·6a13321
+├── 📁wt-mid on 0a62dfe (🏘️)
+│   └── :anon:
+│       └── ·0bc05bf
+├── 📁wt-outside on cad9051
+│   └── :wt-outside[📁]
+│       └── ·4fcfc93
+├── 📁wt-pushed on cad9051
+│   ├── :wt-pushed[📁] <> origin/wt-pushed⇡1
+│   │   └── ·198b592
+│   └── 📙:below-pushed
+│       └── ❄88c9775
+├── 📁wt-stacked on 6a13321 (🏘️)
+│   └── :wt-stacked[📁]
+│       └── ·fc6f8f5
+└── 📁wt-top on 0bc05bf (🏘️)
+    ├── :top[📁wt-top]
+    │   └── ·d175c00
+    └── :mid
+        └── ·b743926
+
+"#]]
+    );
+    assert!(
+        !meta
+            .workspace(ws.ref_name().expect("managed"))?
+            .contains_ref(
+                crate::utils::r("refs/heads/below-pushed"),
+                but_core::ref_metadata::StackKind::Applied
+            ),
+        "worktree lanes have no applied stack to record the new branch in"
+    );
+
+    // Without metadata to order them, a new branch can't share a commit with a lane's branch or
+    // detached `HEAD`, which placing it relative to a branch always does.
+    for (anchor, what) in [
+        (
+            Anchor::AtCommit {
+                commit_id: repo.rev_parse_single("mid")?.detach(),
+                position: Above,
+            },
+            "the tip of a branch",
+        ),
+        (
+            Anchor::at_segment(crate::utils::r("refs/heads/below-pushed"), Above),
+            "above a branch",
+        ),
+        (
+            Anchor::at_segment(crate::utils::r("refs/heads/mid"), Below),
+            "below a branch, onto a detached HEAD",
+        ),
+    ] {
+        let err = but_workspace::branch::create_reference(
+            crate::utils::r("refs/heads/refused"),
+            anchor,
+            &repo,
+            &ws,
+            &mut meta,
+            |_| unreachable!("worktree lanes have no stack"),
+            None,
+        )
+        .expect_err(what);
+        assert!(
+            err.to_string()
+                .contains("branches can't be ordered in worktrees yet"),
+            "{what}: {err}"
+        );
+    }
+    assert!(
+        repo.try_find_reference("refs/heads/refused")?.is_none(),
+        "refusals leave no reference behind"
     );
     Ok(())
 }

@@ -310,7 +310,10 @@ impl Details {
                     },
                 )
             }
-            CliId::Uncommitted { .. } => self.poll_render_thread(
+            CliId::UncommittedArea {
+                source: ChangeSourceId::Head,
+                ..
+            } => self.poll_render_thread(
                 ctx,
                 None,
                 selection_did_change,
@@ -363,7 +366,10 @@ impl Details {
                     },
                 )
             }
-            CliId::WorktreeUncommitted { name, .. } => {
+            CliId::UncommittedArea {
+                source: ChangeSourceId::Worktree(name),
+                ..
+            } => {
                 let name = name.clone();
                 self.poll_render_thread(
                     ctx,
@@ -380,10 +386,6 @@ impl Details {
                         )
                     },
                 )
-            }
-            CliId::Worktree { .. } => {
-                self.diff_not_supported("(a worktree reference has no diff of its own)");
-                Ok(true)
             }
             CliId::AnonymousSegment(..) => {
                 self.diff_not_supported("(anonymous branches must be named with `but reword` before viewing their diff)");
@@ -1247,18 +1249,26 @@ impl Details {
         self.to_be_discarded.contains(&id)
     }
 
-    fn copy_current_hunk(&mut self) -> anyhow::Result<()> {
-        let section = match self.selected_section.get() {
-            SelectedSection::Selected(i) => &self.sections[i],
-            SelectedSection::None | SelectedSection::Deselected(_) => return Ok(()),
+    pub fn selected_hunk_text(&self) -> Option<String> {
+        let SelectedSection::Selected(index) = self.selected_section.get() else {
+            return None;
         };
+        let section = &self.sections[index];
+        Some(format_lines_in_section(
+            &self.lines[section.first_line..=section.last_line],
+        ))
+    }
 
-        let lines = &self.lines[section.first_line..=section.last_line];
-        let hunk_text = format_lines_in_section(lines);
+    fn copy_current_hunk(&mut self) -> anyhow::Result<()> {
+        let Some(hunk_text) = self.selected_hunk_text() else {
+            return Ok(());
+        };
 
         self.clipboard.set_text(hunk_text)?;
 
-        self.highlights.insert(section.id);
+        if let SelectedSection::Selected(index) = self.selected_section.get() {
+            self.highlights.insert(self.sections[index].id);
+        }
 
         Ok(())
     }
@@ -1268,15 +1278,21 @@ impl Details {
             return false;
         };
         match status_selection {
-            CliId::UncommittedHunkOrFile(..) | CliId::Uncommitted { .. } => true,
+            CliId::UncommittedHunkOrFile(..)
+            | CliId::UncommittedArea {
+                source: ChangeSourceId::Head,
+                ..
+            } => true,
             CliId::AnonymousSegment(..)
             | CliId::PathPrefix { .. }
             | CliId::CommittedFile { .. }
             | CliId::CommittedHunk { .. }
             | CliId::Branch(..)
             | CliId::Commit { .. }
-            | CliId::Worktree { .. }
-            | CliId::WorktreeUncommitted { .. }
+            | CliId::UncommittedArea {
+                source: ChangeSourceId::Worktree(_),
+                ..
+            }
             | CliId::Stack { .. } => false,
         }
     }
@@ -1591,11 +1607,12 @@ fn select_pending_cli_id_in_latest_section(
     else {
         return false;
     };
-    if !section
-        .cli_id
-        .as_ref()
-        .is_some_and(|cli_id| target == &**cli_id)
-    {
+    if !section.cli_id.as_ref().is_some_and(|cli_id| {
+        target == &**cli_id
+            // required to maintain the selection on watcher events since `CliId::eq` doesn't
+            // compare short ids
+            || target.short_string() == cli_id.short_string()
+    }) {
         return false;
     }
 
@@ -2067,6 +2084,7 @@ mod tests {
             id: id.into(),
             hunks: NonEmpty::new(IdAndHunk {
                 id: id.into(),
+                tree_status: but_core::TreeStatusKind::Modification,
                 hunk: but_core::SingleHunk {
                     hunk_header: Some(HunkHeader {
                         old_start,

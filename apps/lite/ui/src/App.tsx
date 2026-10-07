@@ -6,8 +6,9 @@ import { type RegisteredRouter, RouterProvider } from "@tanstack/react-router";
 import { type FC, StrictMode, useEffect } from "react";
 import { Provider } from "react-redux";
 import { store } from "#ui/store.ts";
-import { Toasts } from "#ui/components/Toasts.tsx";
+import { Toasts } from "@gitbutler/ui-react/Toasts.tsx";
 import { AskpassPromptDialog } from "#ui/AskpassPromptDialog.tsx";
+import { AppUpdater } from "./AppUpdater.tsx";
 import { guiSettingsQueryOptions } from "./api/queries.ts";
 import { defaultSettings } from "./settings.ts";
 
@@ -66,7 +67,9 @@ export const App: FC<{
 						>
 							<SyntaxThemeSync />
 							<HandCursorSync />
-							<RouterProvider router={router} />
+							<AppUpdater>
+								<RouterProvider router={router} />
+							</AppUpdater>
 							<AskpassPromptDialog />
 							<Toasts />
 						</WorkerPoolContextProvider>

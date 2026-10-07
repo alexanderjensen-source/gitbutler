@@ -49,7 +49,7 @@ jobs:
               - 'package.json'
               - 'pnpm-lock.yaml'
             ui:
-              - 'packages/ui/**'
+              - 'packages/ui-svelte/**'
             but_sdk:
               - 'crates/**'
               - *workflows
@@ -72,8 +72,8 @@ jobs:
               - 'e2e/playwright/fixtures/**'
               - 'e2e/playwright/scripts/**'
               - 'packages/but-sdk/**'
+              - 'packages/ui-react/**'
               - 'scripts/install-minimal-debian-dependencies.sh'
-              - '.nvmrc'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - 'package.json'
@@ -140,7 +140,10 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/init-env-node
       - id: get_playwright_version
-        uses: eviden-actions/get-playwright-version@b0cd9674901dfcdabb64e3cff99a4e582719f0f6 # v1
+        shell: bash
+        run: |
+          version=$(pnpm --filter @gitbutler/ui-svelte --fail-if-no-match exec node -p 'require("playwright/package.json").version')
+          echo "playwright-version=v$version" >> "$GITHUB_OUTPUT"
       - name: Cache playwright binaries
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         id: playwright-cache
@@ -226,6 +229,7 @@ jobs:
           cargo check -p but-workspace --all-targets
           cargo check -p but-api --all-targets
           cargo check -p but --all-targets
+          cargo check -p but --all-targets --features worktree-cow
           # both workspace-projection flavors must keep compiling
           cargo check -p but-api --all-targets --features graph-workspace
           cargo check -p but --all-targets --features graph-workspace
@@ -288,7 +292,7 @@ jobs:
       - name: Dependencies for 'keyring'
         run: sudo ./scripts/install-minimal-debian-dependencies.sh
       - name: Check documentation
-        run: cargo doc --workspace --no-deps --exclude gitbutler-tauri --exclude but-api-macros-tests
+        run: cargo doc --workspace --no-deps --exclude gitbutler-tauri --exclude but-api-macros-tests --features but/nightly
 
   rust-test:
     needs: changes
@@ -328,9 +332,9 @@ jobs:
           tar -xzf cargo-nextest.tar.gz -C ${CARGO_HOME:-~/.cargo}/bin
           rm cargo-nextest.tar.gz
       - name: Run workspace tests
-        run: cargo nextest run --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests --profile ci
+        run: cargo nextest run --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests --features but/nightly,but/worktree-cow --profile ci
       - name: Run doctests
-        run: cargo test --doc --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests
+        run: cargo test --doc --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests --features but/nightly
       - name: Upload results to tests.but.dev
         if: ${{ always() && !cancelled() }}
         continue-on-error: true
@@ -356,6 +360,9 @@ jobs:
             -F "tags[language]=rust" \
             -F "tags[type]=unit" \
             https://tests.but.dev/v1/uploads
+      - name: Run workspace tests without nightly
+        if: github.ref == 'refs/heads/master'
+        run: cargo nextest run --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests --profile ci
       # It's intentional to use 'name equals run-script' so it's easy to re-run locally on failure.
       - run: make test-modern-but
       - name: test vendored
@@ -718,7 +725,10 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/init-env-node
       - id: get_playwright_version
-        uses: eviden-actions/get-playwright-version@b0cd9674901dfcdabb64e3cff99a4e582719f0f6 # v1
+        shell: bash
+        run: |
+          version=$(pnpm --filter @gitbutler/ui-svelte --fail-if-no-match exec node -p 'require("playwright/package.json").version')
+          echo "playwright-version=v$version" >> "$GITHUB_OUTPUT"
       - name: cache playwright binaries
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         id: playwright-cache
@@ -743,8 +753,8 @@ jobs:
         with:
           name: playwright-report
           path: |
-            ./packages/ui/playwright-report/
-            ./packages/ui/test-results/
+            ./packages/ui-svelte/playwright-report/
+            ./packages/ui-svelte/test-results/
           retention-days: 30
 
   lite-e2e:

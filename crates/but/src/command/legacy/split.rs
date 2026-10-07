@@ -20,7 +20,7 @@ use crate::{
 
 pub fn split(
     ctx: &mut Context,
-    _out: IntermediateChannel<'_>,
+    mut out: IntermediateChannel<'_>,
     args: Platform,
 ) -> CliResult<(r#move::MoveOutcome, WorkspaceState)> {
     let mut guard = ctx.exclusive_worktree_access();
@@ -28,7 +28,7 @@ pub fn split(
     let id_map = IdMap::new_from_context(ctx, guard.read_permission())?;
 
     let allow_merged = args.allow_merged;
-    let move_op = resolve(args, ctx, &id_map)?;
+    let move_op = resolve(args, ctx, &id_map, &mut out)?;
     r#move::ensure_not_touching_merged_upstream(
         &move_op,
         &MergedUpstream::from_ctx(ctx, allow_merged)?,
@@ -39,12 +39,19 @@ pub fn split(
         &mut meta,
         guard.write_permission(),
         move_op,
+        false,
     )?)
 }
 
-fn resolve(args: Platform, ctx: &Context, id_map: &IdMap) -> CliResult<MoveOperation> {
+fn resolve(
+    args: Platform,
+    ctx: &Context,
+    id_map: &IdMap,
+    out: &mut IntermediateChannel<'_>,
+) -> CliResult<MoveOperation> {
     let Platform {
         sources,
+        message,
         allow_merged: _,
     } = args;
 
@@ -96,9 +103,7 @@ fn resolve(args: Platform, ctx: &Context, id_map: &IdMap) -> CliResult<MoveOpera
             other @ (ResolvedCliIdArg::Commit(..)
             | ResolvedCliIdArg::Branch(..)
             | ResolvedCliIdArg::UncommittedHunkOrFile(..)
-            | ResolvedCliIdArg::Uncommitted
-            | ResolvedCliIdArg::Worktree(..)
-            | ResolvedCliIdArg::WorktreeUncommitted(..)
+            | ResolvedCliIdArg::Uncommitted(..)
             | ResolvedCliIdArg::PathPrefix { .. }
             | ResolvedCliIdArg::Stack { .. }) => {
                 return Err(bad_input(format!(
@@ -115,6 +120,8 @@ fn resolve(args: Platform, ctx: &Context, id_map: &IdMap) -> CliResult<MoveOpera
     let head_source_commit =
         head_source_commit.expect("BUG: Cannot possibly not have a head source commit here");
 
+    let reword = r#move::message_args_to_reword_operation(message, out)?;
+
     Ok(MoveOperation::ChangesRelativeTo(
         MoveChangesRelativeToOperation {
             source_commit: head_source_commit.clone(),
@@ -123,6 +130,7 @@ fn resolve(args: Platform, ctx: &Context, id_map: &IdMap) -> CliResult<MoveOpera
                 commit: head_source_commit,
                 side: Side::Above,
             },
+            reword,
         },
     ))
 }
@@ -140,7 +148,7 @@ fn ensure_distinct_source_commit(
         return Err(bad_input(format!(
             "Can only split changes from one commit. Got {} and {}",
             theme::Commit(source_commit.as_ref()),
-            theme::Commit(committed_file.as_commit_ref())
+            theme::Commit(committed_file.as_commit_id_ref())
         ))
         .into());
     }

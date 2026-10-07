@@ -43,9 +43,11 @@ use theme::Paint;
 
 #[cfg(feature = "legacy")]
 use crate::command::legacy::ShowDiffInEditor;
+#[cfg(target_os = "linux")]
+use crate::utils::envs::BUT_CREDENTIALS_DIRECTORY;
 use crate::{
     setup::{BackgroundSync, InitCtxOptions, TargetRequirement},
-    utils::{OutputChannel, ResultErrorExt, ResultMetricsExt, envs},
+    utils::{OutputChannel, ResultErrorExt, ResultMetricsExt, change_source::InvokedFrom, envs},
 };
 
 mod error;
@@ -60,6 +62,8 @@ pub use utils::binary_path::is_executed_as_but;
 mod alias;
 /// A place for all command implementations.
 pub(crate) mod command;
+#[cfg(feature = "legacy")]
+pub use command::legacy::status::{FilesStatusFlag, StatusFlags, json as status, workspace_status};
 mod retired_syntax;
 pub mod theme;
 mod tui;
@@ -303,6 +307,11 @@ pub async fn handle_args(args: impl Iterator<Item = OsString>) -> Result<()> {
     let namespace = option_env!("IDENTIFIER").unwrap_or("com.gitbutler.app");
     but_secret::secret::set_application_namespace(namespace);
 
+    #[cfg(target_os = "linux")]
+    if let Some(credentials_dir) = std::env::var_os(BUT_CREDENTIALS_DIRECTORY) {
+        but_secret::secret::file_credentials::setup(credentials_dir)?;
+    }
+
     let mut out = OutputChannel::new(output_format);
     out.set_full_error_chain(watwat);
     #[cfg(feature = "legacy")]
@@ -525,7 +534,7 @@ fn print_and_exit_non_zero<T: std::fmt::Display>(err: T) -> ! {
 enum DispatchOutcome {
     Return,
     ReturnWithOutcome(command::CommandOutcome),
-    ExitWithoutDestructors(anyhow::Result<()>),
+    ExitWithoutDestructors(CliResult<()>),
 }
 
 async fn match_subcommand(
@@ -543,7 +552,10 @@ async fn match_subcommand(
         cmd => cmd,
     };
 
+    #[cfg(feature = "nightly")]
     let is_expand = matches!(&cmd, Subcommands::_Expand { .. });
+    #[cfg(not(feature = "nightly"))]
+    let is_expand = false;
     // A non-interactive invocation of a regular command: the situation where an
     // agent-facing maintenance notice is worth printing.
     let notice_worthy_command = !out.can_prompt()
@@ -794,7 +806,7 @@ async fn dispatch_subcommand(
         Subcommands::Edit { file } => {
             let path = args.current_dir.join(&file);
             return Ok(DispatchOutcome::ExitWithoutDestructors(
-                tui::editor::edit_file(&path),
+                tui::editor::edit_file(&path).map_err(Into::into),
             ));
         }
         #[cfg(feature = "legacy")]
@@ -827,6 +839,7 @@ async fn dispatch_subcommand(
             .map(|()| DispatchOutcome::Return)
             .map_err(CliError::from);
         }
+        #[cfg(feature = "nightly")]
         Subcommands::_Open { .. } => setup::init_ctx(
             &args,
             InitCtxOptions {
@@ -835,6 +848,7 @@ async fn dispatch_subcommand(
             },
             out,
         ),
+        #[cfg(feature = "nightly")]
         Subcommands::_Expand { .. } => but_ctx::Context::discover(&args.current_dir),
         Subcommands::Branch(branch::Platform { ref cmd }) => setup::init_ctx(
             &args,
@@ -959,6 +973,7 @@ async fn dispatch_subcommand(
         Subcommands::Setup { .. } => {
             unreachable!("handled above")
         }
+        #[cfg(feature = "nightly")]
         Subcommands::_Open {
             sources,
             program_id,
@@ -969,6 +984,7 @@ async fn dispatch_subcommand(
             command::open::open(&ctx, out, sources, program_id)?;
             None
         }
+        #[cfg(feature = "nightly")]
         Subcommands::_Expand { cli_id } => {
             let outcome = command::expand::handle(&ctx, cli_id)?;
             out.print_cli_output(outcome)?;
@@ -993,6 +1009,24 @@ async fn dispatch_subcommand(
                 }
                 worktree::Subcommands::Remove { force, worktree } => {
                     let outcome = command::worktree::remove::remove(&mut ctx, &worktree, force)?;
+                    out.print_cli_output(outcome)?;
+                }
+                worktree::Subcommands::New {
+                    name,
+                    above,
+                    #[cfg(feature = "worktree-cow")]
+                    create_mode,
+                } => {
+                    use but_api::worktrees::WorktreeCreationMode;
+                    #[cfg(not(feature = "worktree-cow"))]
+                    let mode = WorktreeCreationMode::Checkout;
+                    #[cfg(feature = "worktree-cow")]
+                    let mode = match create_mode {
+                        worktree::CreateMode::Cow => WorktreeCreationMode::Cow,
+                        worktree::CreateMode::Checkout => WorktreeCreationMode::Checkout,
+                    };
+                    let outcome =
+                        command::worktree::new::new(&mut ctx, name.as_ref(), above.as_ref(), mode)?;
                     out.print_cli_output(outcome)?;
                 }
             }
@@ -1048,6 +1082,7 @@ async fn dispatch_subcommand(
                     &mut ctx,
                     IntermediateChannel::new(out),
                     new_args,
+                    &InvokedFrom::discover(&args.current_dir)?,
                 )?;
                 out.print_cli_output(outcome)?;
                 None
@@ -1101,7 +1136,7 @@ async fn dispatch_subcommand(
         Subcommands::Switch(switch_args) => {
             use crate::utils::IntermediateChannel;
 
-            let outcome = command::legacy::r#switch::switch(
+            let outcome = command::legacy::switch::switch(
                 &mut ctx,
                 IntermediateChannel::new(out),
                 switch_args,
@@ -1192,7 +1227,9 @@ async fn dispatch_subcommand(
                 &mut ctx,
                 out,
                 flags,
-                command::legacy::status::StatusRenderMode::Oneshot,
+                command::legacy::status::StatusRenderMode::Oneshot(Some(InvokedFrom::discover(
+                    &args.current_dir,
+                )?)),
             )?;
             None
         }
@@ -1207,7 +1244,8 @@ async fn dispatch_subcommand(
                 .into());
             }
 
-            let options = TuiLaunchOptions::resolve(tui_args);
+            let mut options = TuiLaunchOptions::resolve(tui_args);
+            options.invoked_from = Some(InvokedFrom::discover(&args.current_dir)?);
             command::legacy::status::worktree(
                 &mut ctx,
                 out,
@@ -1220,15 +1258,20 @@ async fn dispatch_subcommand(
         Subcommands::Diff(diff_args) => {
             use crate::utils::IntermediateChannel;
 
-            let outcome =
-                command::legacy::diff::diff(&mut ctx, IntermediateChannel::new(out), diff_args)?;
+            let outcome = command::legacy::diff::diff(
+                &mut ctx,
+                IntermediateChannel::new(out),
+                diff_args,
+                &InvokedFrom::discover(&args.current_dir)?,
+            )?;
             out.print_cli_output(outcome)?;
             None
         }
         #[cfg(feature = "legacy")]
         Subcommands::Show { commit, verbose } => {
             return Ok(DispatchOutcome::ExitWithoutDestructors(
-                command::legacy::show::show_commit(&mut ctx, out, &commit, verbose),
+                command::legacy::show::show_commit(&mut ctx, out, &commit, verbose)
+                    .map_err(Into::into),
             ));
         }
         #[cfg(feature = "legacy")]
@@ -1244,6 +1287,7 @@ async fn dispatch_subcommand(
                 &mut ctx,
                 IntermediateChannel::new(out),
                 commit_args,
+                &InvokedFrom::discover(&args.current_dir)?,
             )?;
             let metrics_outcome = command::CommandOutcome::Commit(outcome.clone());
             out.print_cli_output(outcome)?;
@@ -1263,6 +1307,7 @@ async fn dispatch_subcommand(
                 &mut ctx,
                 IntermediateChannel::new(out),
                 squash_args,
+                &InvokedFrom::discover(&args.current_dir)?,
             )?;
             out.print_cli_output(outcome)?;
             ws
@@ -1419,6 +1464,7 @@ async fn dispatch_subcommand(
                 source.as_deref(),
                 dry_run,
                 allow_merged,
+                &InvokedFrom::discover(&args.current_dir)?,
             )?;
             None
         }
@@ -1435,9 +1481,10 @@ async fn dispatch_subcommand(
                 &mut ctx,
                 IntermediateChannel::new(out),
                 discard_args,
+                &InvokedFrom::discover(&args.current_dir)?,
             )?;
             out.print_cli_output(outcome)?;
-            Some(ws)
+            ws
         }
         Subcommands::_Comment(comment_args) => {
             use crate::utils::IntermediateChannel;
@@ -1585,14 +1632,14 @@ async fn dispatch_subcommand(
             let status_after = args.status_after
                 && matches!(&cmd, Some(crate::args::resolve::Subcommands::Finish));
             out.begin_status_after(status_after);
-            let result = command::legacy::resolve::handle(&mut ctx, out, cmd, targets, ai)
-                .context("Failed to handle conflict resolution.");
+            let result = command::legacy::resolve::handle(&mut ctx, out, cmd, targets, ai);
             if result.is_ok() {
                 run_status_after_if_requested(
                     status_after,
                     app_settings.agent_skill_notices,
                     &mut ctx,
                     out,
+                    &args.current_dir,
                 );
             }
             return Ok(DispatchOutcome::ExitWithoutDestructors(result));
@@ -1623,8 +1670,12 @@ async fn dispatch_subcommand(
             status_after_data = Some(status_after);
 
             newly_conflicted_data = Some(command::legacy::conflict_notice::snapshot(&ctx));
-            let (outcome, ws) =
-                command::legacy::amend::amend(&mut ctx, IntermediateChannel::new(out), amend_args)?;
+            let (outcome, ws) = command::legacy::amend::amend(
+                &mut ctx,
+                IntermediateChannel::new(out),
+                amend_args,
+                &InvokedFrom::discover(&args.current_dir)?,
+            )?;
             out.print_cli_output(outcome)?;
             ws
         }
@@ -1638,7 +1689,8 @@ async fn dispatch_subcommand(
             let conflicts_before = command::legacy::conflict_notice::snapshot(&ctx);
             let result =
                 command::legacy::merge::handle(&mut ctx, out, &branch, yes, no_ff, whole_stack)
-                    .context("Failed to merge branch.");
+                    .context("Failed to merge branch.")
+                    .map_err(Into::into);
             if result.is_ok() {
                 command::legacy::conflict_notice::report_newly_conflicted(
                     &ctx,
@@ -1657,8 +1709,12 @@ async fn dispatch_subcommand(
             status_after_data = Some(status_after);
 
             newly_conflicted_data = Some(command::legacy::conflict_notice::snapshot(&ctx));
-            let (outcome, ws) =
-                command::legacy::pick::pick(&mut ctx, IntermediateChannel::new(out), pick_args)?;
+            let (outcome, ws) = command::legacy::pick::pick(
+                &mut ctx,
+                IntermediateChannel::new(out),
+                pick_args,
+                &InvokedFrom::discover(&args.current_dir)?,
+            )?;
             out.print_cli_output(outcome)?;
             Some(ws)
         }
@@ -1719,6 +1775,7 @@ async fn dispatch_subcommand(
             app_settings.agent_skill_notices,
             &mut ctx,
             out,
+            &args.current_dir,
         );
     }
 
@@ -1787,6 +1844,7 @@ fn run_status_after_if_requested(
     agent_skill_notices: bool,
     ctx: &mut but_ctx::Context,
     out: &mut OutputChannel,
+    current_dir: &std::path::Path,
 ) {
     if !status_after {
         if agent_skill_notices
@@ -1798,7 +1856,13 @@ fn run_status_after_if_requested(
         return;
     }
     let mutation_json = out.take_json_buffer();
-    run_status_after(agent_skill_notices, ctx, out, mutation_json);
+    run_status_after(
+        agent_skill_notices,
+        ctx,
+        out,
+        mutation_json,
+        InvokedFrom::discover(current_dir).ok(),
+    );
 }
 
 /// Run workspace status output after a mutation command when explicitly requested.
@@ -1819,6 +1883,7 @@ fn run_status_after(
     ctx: &mut but_ctx::Context,
     out: &mut OutputChannel,
     mutation_json: Option<serde_json::Value>,
+    invoked_from: Option<InvokedFrom>,
 ) {
     use crate::command::legacy::status::StatusFlags;
 
@@ -1831,8 +1896,11 @@ fn run_status_after(
         let status_result = command::legacy::status::worktree(
             ctx,
             out,
-            StatusFlags::all_false(),
-            command::legacy::status::StatusRenderMode::Oneshot,
+            StatusFlags {
+                show_files: crate::command::legacy::status::FilesStatusFlag::All,
+                ..StatusFlags::all_false()
+            },
+            command::legacy::status::StatusRenderMode::Oneshot(invoked_from),
         );
         let status_json = out.take_json_buffer().unwrap_or(serde_json::Value::Null);
 
@@ -1875,7 +1943,7 @@ fn run_status_after(
                 hint: true,
                 ..StatusFlags::all_false()
             },
-            command::legacy::status::StatusRenderMode::Oneshot,
+            command::legacy::status::StatusRenderMode::Oneshot(invoked_from),
         ) {
             eprintln!(
                 "warning: status after mutation failed: {err:#}. Run 'but status' separately to check workspace state."

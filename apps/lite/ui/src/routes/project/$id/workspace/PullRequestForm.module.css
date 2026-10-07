@@ -1,15 +1,7 @@
 .prActions {
 	display: flex;
+	align-items: center;
 	gap: 7px;
-}
-
-.disabledActionWrap {
-	display: inline-flex;
-
-	/* Disabled buttons don't fire pointer events; let the wrapper receive them. */
-	> button:disabled {
-		pointer-events: none;
-	}
 }
 
 .prForm {
@@ -162,7 +154,7 @@
 .prViewTitle {
 	font-weight: 600;
 	font-size: 18px;
-	line-height: var(--text-lineheight-default);
+	line-height: var(--font-line-height-default);
 	font-family: var(--fontfamily-base);
 }
 

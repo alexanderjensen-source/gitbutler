@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
-use but_graph::{Commit, SegmentIndex};
+use but_graph::{Commit, RefInfo, SegmentIndex};
 use petgraph::{Direction, visit::EdgeRef as _};
 
 use crate::graph_rebase::{
     Checkout, Edge, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
-    SuccessfulRebase, util,
+    SuccessfulRebase,
+    util::{self, OrderedParentKind},
 };
 
 #[derive(Clone)]
@@ -115,6 +116,14 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
         }
 
         let mut segments = HashMap::<SegmentIndex, NodeSegment>::new();
+        let is_checked_out_only_where_the_editor_moves_heads = |ref_info: &RefInfo| {
+            ref_info.worktree.as_ref().is_none_or(|worktree| {
+                worktree.owned_by_repo
+                    || worktree_tips
+                        .iter()
+                        .any(|tip| tip.ref_name.as_ref() == Some(&ref_info.ref_name))
+            })
+        };
 
         for sid in segments_to_add {
             let segment = &workspace.graph[sid];
@@ -126,12 +135,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 let reference_mutable =
                     segment_mutable && refname.category() == Some(gix::refs::Category::LocalBranch);
                 // Only mutable references are tracked for potential deletion.
-                if reference_mutable
-                    && ref_info
-                        .worktree
-                        .as_ref()
-                        .is_none_or(|worktree| worktree.owned_by_repo)
-                {
+                if reference_mutable && is_checked_out_only_where_the_editor_moves_heads(ref_info) {
                     references.push(refname.clone());
                 }
                 let ix = graph.add_node(Step::Reference {
@@ -157,10 +161,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     let reference_mutable = segment_mutable
                         && refname.category() == Some(gix::refs::Category::LocalBranch);
                     if reference_mutable
-                        && ref_info
-                            .worktree
-                            .as_ref()
-                            .is_none_or(|worktree| worktree.owned_by_repo)
+                        && is_checked_out_only_where_the_editor_moves_heads(ref_info)
                     {
                         references.push(refname.clone());
                     }
@@ -222,6 +223,18 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             };
         }
 
+        // An edge into an empty segment carries no parent order. Every other commit has its
+        // parents checked against the commit itself further down; the workspace commit is
+        // exempt from that check, so its order is resolved from the commit here.
+        let workspace_commit_parent_order = |source: SegmentIndex, target: SegmentIndex| {
+            let commit = workspace.graph[source].commits.last()?;
+            if Some(commit.id) != workspace_commit_id {
+                return None;
+            }
+            let parent = workspace.graph.tip_skip_empty(target)?;
+            commit.parent_ids.iter().position(|id| *id == parent.id)
+        };
+
         for sidx in segments.keys() {
             let Some(source) = segments.get(sidx).and_then(|n| n.nodes.last()) else {
                 continue;
@@ -251,8 +264,12 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     continue 'inner;
                 };
 
-                // TODO: does it have relevance when `parent_order()` is `None` for edges to virtual segments?
-                let order = edge.weight().parent_order().unwrap_or(0) as usize;
+                let order = edge
+                    .weight()
+                    .parent_order()
+                    .map(|order| order as usize)
+                    .or_else(|| workspace_commit_parent_order(*sidx, edge.target()))
+                    .unwrap_or(0);
                 graph.add_edge(*source, *target, Edge { order });
             }
         }
@@ -276,7 +293,8 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             }
 
             // Resolve what the graph thinks are the parents of this pick
-            let graph_parents = util::collect_ordered_parents(&graph, pick_ix);
+            let graph_parents =
+                util::collect_ordered_parents(&graph, pick_ix, OrderedParentKind::CommitOnly);
             let graph_parent_ids: Vec<gix::ObjectId> = graph_parents
                 .iter()
                 .filter_map(|idx| match &graph[*idx] {

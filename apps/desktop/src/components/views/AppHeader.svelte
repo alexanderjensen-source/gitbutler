@@ -22,8 +22,8 @@
 		TestId,
 		Toggle,
 		Tooltip,
-	} from "@gitbutler/ui";
-	import { focusable } from "@gitbutler/ui/focus/focusable";
+	} from "@gitbutler/ui-svelte";
+	import { focusable } from "@gitbutler/ui-svelte/focus/focusable";
 
 	type Props = {
 		projectId: string;

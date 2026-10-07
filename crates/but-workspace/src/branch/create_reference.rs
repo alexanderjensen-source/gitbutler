@@ -236,8 +236,30 @@ pub(super) mod function {
             .try_find_reference(ref_name)?
             .map(|mut reference| reference.peel_to_id().map(|id| id.detach()))
             .transpose()?;
-        let existing_ref_target_in_workspace = existing_ref_target_id
-            .filter(|id| workspace.find_owner_indexes_by_commit_id(*id).is_some());
+        let existing_ref_target_in_workspace =
+            existing_ref_target_id.filter(|id| workspace.find_commit(*id).is_some());
+
+        if let Some(
+            Anchor::AtSegment {
+                ref_name: anchor_ref,
+                ..
+            }
+            | Anchor::AtReference {
+                ref_name: anchor_ref,
+                ..
+            },
+        ) = &anchor
+            && workspace
+                .find_segment_and_stack_by_refname(anchor_ref.as_ref())
+                .is_none()
+            && workspace.refname_is_segment(anchor_ref.as_ref())
+        {
+            bail_precondition!(
+                "Cannot place '{}' relative to worktree branch '{}': branches can't be ordered in worktrees yet",
+                ref_name.shorten(),
+                anchor_ref.shorten()
+            );
+        }
 
         let AnchorResolution {
             target_id: ref_target_id,
@@ -248,57 +270,23 @@ pub(super) mod function {
         } = match anchor {
             None => {
                 // The new ref exists already in the workspace, do nothing.
-                if workspace
-                    .find_segment_and_stack_by_refname(ref_name)
-                    .is_some()
-                {
+                if workspace.refname_is_segment(ref_name) {
                     return Ok(Cow::Borrowed(workspace));
                 }
                 if let Some(existing_ref_target_id) = existing_ref_target_in_workspace {
-                    let instruction = existing_ws_meta
-                        .as_ref()
-                        .map(|_| {
-                            instruction_by_named_anchor_for_commit(
-                                workspace,
-                                existing_ref_target_id,
-                            )
-                        })
-                        .transpose()?;
+                    let instruction = existing_ws_meta.as_ref().and_then(|_| {
+                        instruction_by_named_anchor_for_commit(workspace, existing_ref_target_id)
+                    });
                     // Expect the target id to be in the workspace.
                     AnchorResolution::positioned(existing_ref_target_id, true, instruction)
                 } else {
-                    // The target tip (e.g. `origin/main`) can be advanced *past* the
-                    // workspace, i.e. outside it. Anchoring a new independent branch there
-                    // would stop re-projection from surfacing it as a standalone segment.
-                    // Anchor at the merge-base of the target tip and the workspace commit
-                    // instead — the fork point, always inside the workspace.
-                    let target_tip = workspace
-                        .resolved_target_commit_id()
-                        .or(ws_base)
-                        .with_context(|| {
-                            format!(
-                                "workspace at {} is missing a base",
-                                workspace.ref_name_display()
-                            )
-                        })?;
-                    // The merge-base needs the workspace commit. Without it (e.g. a headless,
-                    // unmanaged workspace) there is no fork point and thus no insertion point
-                    // inside the workspace, so refuse rather than silently anchor at the
-                    // target tip — the very commit we know may sit outside the workspace.
-                    let ws_commit_id = workspace
-                        .ref_name()
-                        .and_then(|ws_ref| repo.try_find_reference(ws_ref).ok().flatten())
-                        .and_then(|mut ws_ref| ws_ref.peel_to_id().ok())
-                        .map(|id| id.detach())
-                        .with_context(|| {
-                            format!(
-                                "Cannot create independent branch: workspace at {} has no commit to anchor against",
-                                workspace.ref_name_display()
-                            )
-                        })?;
-                    let base = repo.merge_base(target_tip, ws_commit_id)?.detach();
-                    // Don't validate: the merge-base is the workspace's lower bound (the
-                    // fork point), not a commit owned by any segment.
+                    let base = workspace.highest_base().with_context(|| {
+                        format!(
+                            "workspace at {} is missing a base",
+                            workspace.ref_name_display()
+                        )
+                    })?;
+                    // Don't validate: the base sits on the target's history, not in a segment.
                     AnchorResolution::positioned(base, false, Some(Instruction::Independent))
                 }
             }
@@ -306,40 +294,36 @@ pub(super) mod function {
                 commit_id,
                 position,
             }) => {
-                let mut validate_id = true;
-                let indexes = workspace.try_find_owner_indexes_by_commit_id(commit_id)?;
-                let ref_target_id =
-                    position.resolve_commit(workspace.lookup_commit(indexes).into(), ws_base)?;
+                // The workspace base is a valid boundary anchor, but isn't a stack commit.
+                let ref_target_id = if Some(commit_id) == ws_base {
+                    commit_id
+                } else {
+                    position
+                        .resolve_commit(workspace.try_find_commit(commit_id)?.into(), ws_base)?
+                };
                 let id_out_of_workspace = Some(ref_target_id) == ws_base;
-                if id_out_of_workspace {
-                    validate_id = false
-                }
 
                 let instruction = existing_ws_meta
                     .as_ref()
                     .filter(|_| !id_out_of_workspace)
-                    .map(|_| instruction_by_named_anchor_for_commit(workspace, commit_id))
+                    .and_then(|_| instruction_by_named_anchor_for_commit(workspace, commit_id))
                     .or_else(|| {
-                        let (stack_idx, _seg_idx, _cidx) = indexes;
+                        let (stack_idx, _seg_idx, _cidx) =
+                            workspace.find_owner_indexes_by_commit_id(commit_id)?;
                         workspace.stacks[stack_idx]
                             .id
                             .map(Instruction::DependentInStack)
-                            .map(Ok)
                     })
-                    .transpose()?;
+                    .or_else(|| id_out_of_workspace.then_some(Instruction::Independent));
 
-                AnchorResolution::positioned(ref_target_id, validate_id, instruction)
+                AnchorResolution::positioned(ref_target_id, !id_out_of_workspace, instruction)
             }
             Some(Anchor::AtSegment {
                 ref_name: anchor_ref,
                 position,
             }) => {
-                let mut validate_id = true;
+                let segment = workspace.try_find_segment_by_refname(anchor_ref.as_ref())?;
                 let ref_target_id = if workspace.has_metadata() {
-                    let (stack_idx, seg_idx) =
-                        workspace.try_find_segment_owner_indexes_by_refname(anchor_ref.as_ref())?;
-                    let segment = &workspace.stacks[stack_idx].segments[seg_idx];
-
                     workspace
                         .tip_commit_by_segment_id(segment.id)
                         .map(|commit| position.resolve_commit(commit.into(), ws_base))
@@ -347,14 +331,6 @@ pub(super) mod function {
                             "BUG: we should always see through to the base or eligible commits",
                         )??
                 } else {
-                    let Some((_stack, segment)) =
-                        workspace.find_segment_and_stack_by_refname(anchor_ref.as_ref())
-                    else {
-                        bail!(
-                            "Could not find a segment named '{}' in workspace",
-                            anchor_ref.shorten()
-                        );
-                    };
                     position.resolve_commit(
                         segment
                             .commits
@@ -365,9 +341,6 @@ pub(super) mod function {
                     )?
                 };
                 let points_to_workspace_base = Some(ref_target_id) == ws_base;
-                if points_to_workspace_base {
-                    validate_id = false;
-                }
                 // The lower bound owns no commits, so an ad-hoc workspace needs explicit ref
                 // ordering to project the new empty segment at that boundary.
                 let branch_stack_order = if !workspace.has_metadata() && points_to_workspace_base {
@@ -392,7 +365,7 @@ pub(super) mod function {
                 };
                 let mut resolution = AnchorResolution::positioned(
                     ref_target_id,
-                    validate_id,
+                    !points_to_workspace_base,
                     Some(Instruction::Dependent {
                         ref_name: anchor_ref,
                         position,
@@ -415,9 +388,7 @@ pub(super) mod function {
                     );
                 }
                 if workspace.has_metadata() {
-                    let (stack_idx, seg_idx) =
-                        workspace.try_find_segment_owner_indexes_by_refname(anchor_ref.as_ref())?;
-                    let segment = &workspace.stacks[stack_idx].segments[seg_idx];
+                    let segment = workspace.try_find_segment_by_refname(anchor_ref.as_ref())?;
                     let ref_target_id = workspace
                         .tip_commit_by_segment_id(segment.id)
                         .map(|commit| commit.id)
@@ -460,7 +431,14 @@ pub(super) mod function {
             .transpose()?;
         // Assure this commit is in the workspace as well.
         if check_if_id_in_workspace {
-            workspace.try_find_owner_indexes_by_commit_id(ref_target_id)?;
+            workspace.try_find_commit(ref_target_id)?;
+        }
+        if starts_worktree_segment(workspace, ref_target_id) {
+            bail_precondition!(
+                "Cannot place '{}' at {ref_target_id}: a worktree branch or checkout already points there, \
+                 and branches can't be ordered in worktrees yet",
+                ref_name.shorten()
+            );
         }
 
         let graph_with_new_ref = {
@@ -496,9 +474,7 @@ pub(super) mod function {
         };
 
         let updated_workspace = graph_with_new_ref.into_workspace()?;
-        let has_new_ref_as_standalone_segment = updated_workspace
-            .find_segment_and_stack_by_refname(ref_name)
-            .is_some();
+        let has_new_ref_as_standalone_segment = updated_workspace.refname_is_segment(ref_name);
         let existing_ref_is_in_workspace = existing_ref_target_in_workspace.is_some();
         if !has_new_ref_as_standalone_segment {
             if existing_ref_target_id.is_some()
@@ -788,19 +764,14 @@ pub(super) mod function {
     /// so that it represents the `position` of `anchor_id`.
     /// `position` indicates where, in relation to `anchor_id`, the ref name should be inserted.
     /// The first name that is also in `ws_meta` will be used.
+    /// Return `None` if no stack holds `anchor_id`, as worktree lanes have no workspace metadata.
     fn instruction_by_named_anchor_for_commit(
         ws: &but_graph::Workspace,
         anchor_id: gix::ObjectId,
-    ) -> anyhow::Result<Instruction<'static>> {
+    ) -> Option<Instruction<'static>> {
         use Position::*;
-        let (anchor_stack_idx, anchor_seg_idx, _anchor_commit_idx) = ws
-            .find_owner_indexes_by_commit_id(anchor_id)
-            .with_context(|| {
-                format!(
-                    "No segment in workspace at '{}' that holds {anchor_id}",
-                    ws.ref_name_display()
-                )
-            })?;
+        let (anchor_stack_idx, anchor_seg_idx, _anchor_commit_idx) =
+            ws.find_owner_indexes_by_commit_id(anchor_id)?;
 
         let stack = &ws.stacks[anchor_stack_idx];
         // Find first non-empty segment in this stack upward and downward.
@@ -832,7 +803,20 @@ pub(super) mod function {
                     Some(id) => Instruction::DependentInStack(id),
                 },
             );
-        Ok(instruction)
+        Some(instruction)
+    }
+
+    /// Return `true` if `id` is where a branch or a detached `HEAD` of a worktree lane points.
+    fn starts_worktree_segment(ws: &but_graph::Workspace, id: gix::ObjectId) -> bool {
+        ws.worktrees
+            .iter()
+            .flat_map(|worktree| &worktree.segments)
+            .any(|segment| {
+                segment
+                    .commits
+                    .first()
+                    .is_some_and(|commit| commit.id == id)
+            })
     }
 
     #[derive(Debug)]

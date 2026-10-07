@@ -73,12 +73,6 @@ jobs:
         env:
           SENTRY_RELEASE: ${{ env.version }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        name: Upload pnpm-store contents
-        with:
-          name: pnpm-store
-          path: /home/runner/setup-pnpm/node_modules/.bin/store/v3
-          retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         name: Upload SvelteKit build output
         with:
           name: sveltekit-build
@@ -208,6 +202,7 @@ jobs:
             --dist                       "./release" \
             --version                    "${{ env.version }}"
         env:
+          EXTRA_CARGO_FEATURES: ${{ runner.os == 'macOS' && 'worktree-cow' || '' }}
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
           CARGO_PROFILE_RELEASE_OPT_LEVEL: s
@@ -238,6 +233,7 @@ jobs:
           CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: "off"
         run: |
           cargo build --locked --release -p but --bin but \
+            --features nightly \
             --target x86_64-unknown-linux-gnu \
             --target-dir target/profiling
 

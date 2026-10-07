@@ -1,0 +1,45 @@
+import { Toast } from "@base-ui/react";
+import type { FC } from "react";
+import { classes } from "./classes.ts";
+import { Button } from "./Button.tsx";
+import styles from "./Toasts.module.css";
+import popupStyles from "./Popup.module.css";
+
+/**
+ * Where toasts appear. Render it once inside Base UI's `Toast.Provider`; anything under the
+ * provider raises one through `Toast.useToastManager().add()`.
+ *
+ * @import import { Toasts } from "@gitbutler/ui-react/Toasts.tsx";
+ */
+export const Toasts: FC = () => {
+	const { toasts } = Toast.useToastManager();
+
+	return (
+		<Toast.Portal>
+			<Toast.Viewport className={styles.viewport}>
+				{toasts.map((toast) => (
+					<Toast.Root
+						key={toast.id}
+						toast={toast}
+						className={classes(popupStyles.popup, styles.root)}
+					>
+						<Toast.Content className={styles.content}>
+							<Toast.Title render={<strong />} className="text-15 text-semibold" />
+							<Toast.Description
+								render={
+									// Default is `p` which restricts content elements.
+									<div />
+								}
+								className="text-13"
+							/>
+							<div className={styles.actions}>
+								{toast.actionProps && <Toast.Action render={<Button />} />}
+								<Toast.Close render={<Button />}>Dismiss</Toast.Close>
+							</div>
+						</Toast.Content>
+					</Toast.Root>
+				))}
+			</Toast.Viewport>
+		</Toast.Portal>
+	);
+};

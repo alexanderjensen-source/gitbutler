@@ -1,4 +1,5 @@
 import type { BundledTheme } from "shiki";
+import * as ms from "ms";
 import type { GUISettings } from "#electron/settings.ts";
 
 // [tag:lite_default_settings]
@@ -16,18 +17,15 @@ export const defaultSettings = {
 	diffOverflow: "scroll",
 	diffStyle: "split",
 	diffTabSize: 4,
-	// Previewing while dragging runs a dry run for every target the pointer crosses, and
-	// each one takes the same workspace lock as the real operation. Off until that's cheap.
-	dryRunOperations: false,
 	// Show the folder tree until the user chooses a display mode.
 	fileDisplayMode: "tree",
 	filesPanelRight: false,
-	// Desktop apps keep the arrow over controls; the hand is a web convention (DESIGN.md, Cursors).
+	graphTrunk: false,
+	// Desktop apps keep the arrow over controls; the hand is a web convention (ui-react's design/foundations/cursors.md).
 	handCursor: false,
 	// Pierre's own default, named here so the setting has somewhere to fall back to.
 	lineDiffType: "word-alt",
 	// Experimental; opt in from the Experimental settings.
-	minimap: false,
 	// Lite has always led with the file name; desktop leads with the path.
 	pathFirst: false,
 	// Loud = the notification bell; quiet = tracked but nothing shown;
@@ -47,3 +45,16 @@ export const defaultSettings = {
 
 export const clampAutoFetch = (ms: number): number =>
 	Math.min(Math.max(ms, 10_000), 60 * 1000 * 60 * 24);
+
+/**
+ * The stored auto-fetch frequency in milliseconds, or `NaN` for a value that isn't a duration —
+ * "off", or something an older build wrote — which turns auto-fetch off.
+ */
+export const parseAutoFetch = (setting: string): number => {
+	// Throws on empty and large strings.
+	try {
+		return ms.parse(setting);
+	} catch {
+		return Number.NaN;
+	}
+};

@@ -1,7 +1,7 @@
 import { useSuspenseQueries, useQueryClient } from "@tanstack/react-query";
 import { useState, type FC } from "react";
 import { aiConfigurationQueryOptions } from "#ui/api/queries.ts";
-import { Switch } from "#ui/components/Switch.tsx";
+import { Switch } from "@gitbutler/ui-react/Switch.tsx";
 import {
 	DEFAULT_COMMIT_MESSAGE_PROMPT,
 	projectAiSettingsQueryOptions,
@@ -45,6 +45,7 @@ export const ProjectAi: FC<{ projectId: string }> = ({ projectId }) => {
 				}
 			>
 				<Switch
+					size="large"
 					aria-labelledby="project-ai-enabled"
 					checked={stored.enabled && configuration.isConfigured}
 					disabled={!configuration.isConfigured}

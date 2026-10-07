@@ -1516,6 +1516,42 @@ Single commit, target, no ws commit, but ws-reference
     }
 
     #[test]
+    fn at_commit_on_ws_base() -> anyhow::Result<()> {
+        for position in [Above, Below] {
+            let (_tmp, repo, mut meta, mut db) =
+                named_writable_scenario("single-branch-no-ws-commit")?;
+            let ws = but_graph::Graph::from_head(
+                &repo,
+                &meta,
+                project_meta(&repo)?,
+                &mut db,
+                Options::limited(),
+            )?
+            .into_workspace()?;
+            let base = ws.lower_bound.expect("fixture has a workspace base");
+            let new_ref = r("refs/heads/at-base");
+            but_workspace::branch::create_reference(
+                new_ref,
+                Anchor::AtCommit {
+                    commit_id: base,
+                    position,
+                },
+                &repo,
+                &ws,
+                &mut meta,
+                stack_id_for_name,
+                None,
+            )?;
+            assert_eq!(
+                repo.find_reference(new_ref)?.peel_to_id()?.detach(),
+                base,
+                "both positions at the workspace boundary must point to the base"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn at_reference_on_ws_base() -> anyhow::Result<()> {
         let (_tmp, repo, mut meta, mut db) = named_writable_scenario("single-branch-no-ws-commit")?;
         snapbox::assert_data_eq!(
@@ -1778,7 +1814,9 @@ Single commit, target, no ws commit, but ws-reference
         .unwrap_err();
         snapbox::assert_data_eq!(
             err.to_string(),
-            snapbox::str!["Couldn't find any stack that contained the branch named 'bogus'"]
+            snapbox::str![
+                "Couldn't find any stack or worktree that contained the branch named 'bogus'"
+            ]
         );
         assert!(
             repo.try_find_reference(new_ref)?.is_none(),
@@ -1881,7 +1919,7 @@ Single commit, target, no ws commit, but ws-reference
             let expected_err = if matches!(anchor, Anchor::AtCommit { .. }) {
                 "Commit 3183e43ff482a2c4c8ff531d595453b64f58d90b isn't part of the workspace"
             } else {
-                "Couldn't find any stack that contained the branch named 'origin/main'"
+                "Couldn't find any stack or worktree that contained the branch named 'origin/main'"
             };
             assert_eq!(
                 err.to_string(),
@@ -2052,7 +2090,7 @@ Single commit, target, no ws commit, but ws-reference
 
         assert_eq!(
             err.to_string(),
-            "Couldn't find any stack that contained the branch named 'bogus'",
+            "Couldn't find any stack or worktree that contained the branch named 'bogus'",
             "It yells loudly if the inputs don't match up - anchors must always be in the workspace."
         );
         Ok(())
@@ -2105,7 +2143,9 @@ Single commit, target, no ws commit, but ws-reference
         // Precondition (see `⇣1` above): the target tip (M2) is one commit ahead of A's base,
         // so it sits OUTSIDE the workspace — the situation the no-anchor path mishandled.
         let target_id = ws
-            .resolved_target_commit_id()
+            .target_commit
+            .as_ref()
+            .map(|target| target.commit_id)
             .expect("the scenario sets a default target");
         assert!(
             ws.find_owner_indexes_by_commit_id(target_id).is_none(),
@@ -2241,9 +2281,9 @@ fn errors() -> anyhow::Result<()> {
             matches!(
                 err.as_str(),
                 "Cannot create reference on unborn branch"
-                    | "Commit c166d42d4ef2e5e742d33554d03805cfb0b24d11 isn't part of the workspace"
+                    | "Branch 'does-not-matter' cannot be created: the target commit (c166d42d4ef2e5e742d33554d03805cfb0b24d11) already belongs to another branch in the workspace. Each commit can only belong to one branch at a time."
             ),
-            "workspace base cannot be used as a below-anchor: {err}"
+            "a base anchor must not create a branch absent from the resulting projection: {err}"
         );
         assert!(
             repo.try_find_reference(new_name)?.is_none(),
@@ -2302,7 +2342,7 @@ fn errors() -> anyhow::Result<()> {
         .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Could not find a segment named 'A' in workspace",
+            "Couldn't find any stack or worktree that contained the branch named 'A'",
             "segments need to be in the workspace, too"
         );
         assert!(

@@ -32,38 +32,31 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	/* Keep row height stable whether or not a (small, tag-sized) picker button renders. */
-	min-height: var(--size-tag);
+	/* Keep row height stable whether or not a small picker button renders. */
+	min-height: var(--size-control-sm);
 	gap: 8px;
 }
 
 .heading {
+	display: flex;
+	align-items: center;
 	color: var(--text-2);
 }
 
-/* Only the stacked layout folds the card; beside the column it has the
-   height to show everything. */
-.panelFooter {
-	display: none;
-	padding-inline: 14px;
-	padding-block: 8px;
-	border-top: 1px solid var(--border-section);
-	border-radius: 0 0 var(--radius-card) var(--radius-card);
-	background-color: var(--bg-2);
+.sectionToggle {
+	/* Align the 12px chevron inside its 22px hit target with the content inset. */
+	margin-inline-start: -5px;
+	color: inherit;
 }
 
-.panelFooterToggle {
-	padding: 0;
-	border: none;
-	background: none;
-	color: var(--text-1);
-	/* The designed link treatment: dotted, on the font's own underline. */
-	text-decoration: underline dotted;
-	text-underline-position: from-font;
-	opacity: 0.7;
+.sectionContent {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
 
-	&:hover {
-		opacity: 1;
+	&[hidden],
+	&:empty {
+		display: none;
 	}
 }
 
@@ -75,65 +68,14 @@
 		position: static;
 		flex-basis: auto;
 	}
-
-	/* Folded, the card hides its reference sections behind the footer, so
-	   the description stays in reach. */
-	.panel[data-collapsed] > .foldable {
-		display: none;
-	}
-
-	.panelFooter {
-		display: flex;
-	}
 }
 
-/* The Status section is its header alone: the badge and the PR link sit
-   opposite the heading. */
+/* The Status section is its header alone: the badge, the PR link and the
+   menu that changes the status sit opposite the heading. */
 .statusActions {
 	display: flex;
 	align-items: center;
 	gap: 12px;
-}
-
-/* The badge is the menu trigger, so the button is invisible around it; the
-   hover deepens the badge's own tint rather than adding a ground of its own. */
-.statusTrigger {
-	display: flex;
-	padding: 0;
-	border: none;
-	border-radius: 30px;
-	background: none;
-
-	& > span {
-		transition: var(--transition-button);
-	}
-
-	&:hover:not(:disabled) > span {
-		--badge-bg-opacity: 28%;
-	}
-
-	&:disabled {
-		opacity: 0.6;
-	}
-}
-
-.link {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	color: var(--text-2);
-}
-
-/* Sits in the Status section's header, opposite the heading. */
-.prLink {
-	text-decoration: underline;
-	text-decoration-color: color-mix(in srgb, currentcolor 40%, transparent);
-	text-underline-position: from-font;
-
-	&:hover {
-		color: var(--text-1);
-		text-decoration-color: currentcolor;
-	}
 }
 
 .user {
@@ -177,7 +119,7 @@
 	flex-shrink: 0;
 	place-items: center;
 	width: 22px;
-	height: var(--size-tag);
+	height: var(--size-control-sm);
 }
 
 .reviewerRemove {
@@ -191,33 +133,10 @@
 	}
 }
 
-.avatar {
-	flex-shrink: 0;
-	width: 18px;
-	height: 18px;
-	border-radius: 50%;
-	background-color: lightgray;
-}
-
 .labels {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 4px;
-}
-
-/* Badge owns the pill itself; forge label colors are arbitrary hex, so only the
-   tint is overridden here — descendant-scoped so it beats Badge's own variant
-   colors regardless of stylesheet order. Colorless labels keep the lightGray
-   variant untouched. */
-.labels .label {
-	background-color: color-mix(in srgb, var(--label-color) 20%, transparent);
-	color: color-mix(in oklab, var(--label-color) 60%, var(--text-1));
-}
-
-.checks {
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
 }
 
 .checksSummary {
@@ -236,7 +155,7 @@
 
 .barSegment {
 	flex-basis: 0;
-	border-radius: 5px;
+	border-radius: var(--radius-full);
 }
 
 .barPassed {
@@ -249,6 +168,10 @@
 
 .barFailed {
 	background-color: var(--fill-danger-bg);
+}
+
+.barActionRequired {
+	background-color: var(--fill-warn-bg);
 }
 
 .checksCounts {
@@ -265,6 +188,10 @@
 	color: var(--text-safe);
 }
 
+.countActionRequired {
+	color: var(--text-warn);
+}
+
 .countPending {
 	color: var(--text-2);
 }
@@ -275,25 +202,32 @@
 
 .checksDivider {
 	height: 1px;
+	margin-inline: -14px -12px;
 	background-color: var(--border-section);
 }
 
 .checksList {
-	display: flex;
-	flex-direction: column;
+	max-height: min(280px, 40vh);
+	/* Reach the section edges; the rows provide the content inset. */
+	margin: -8px -12px -12px -14px;
 }
 
-/* Inset by its own padding so the hover background reads as a row. */
+/* Focusable while the jobs overflow, so keyboard users can scroll them. */
+.checksViewport:focus-visible {
+	outline: var(--focus-ring);
+	outline-offset: -2px;
+}
+
 .checkRow {
 	display: flex;
+	flex-shrink: 0;
 	align-items: center;
-	padding: 4px;
+	padding: 4px 12px 4px 14px;
 	gap: 8px;
-	border-radius: var(--radius-button);
 	color: var(--text-1);
 
 	&:hover {
-		background-color: var(--list-item-hover-bg);
+		background-color: var(--bg-hover);
 	}
 }
 
@@ -301,7 +235,7 @@
 	flex-shrink: 0;
 	width: 8px;
 	height: 8px;
-	border-radius: 50%;
+	border-radius: var(--radius-full);
 }
 
 .checkDotDanger {
@@ -312,13 +246,22 @@
 	background-color: var(--fill-warn-bg);
 }
 
+.checkDotSafe {
+	background-color: var(--fill-safe-bg);
+}
+
 .checkDotMuted {
 	background-color: var(--scale-gray-70);
 }
 
-.checkName {
+.checkBody {
+	display: flex;
 	flex: 1;
+	flex-direction: column;
 	min-width: 0;
+}
+
+.checkName {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -326,10 +269,22 @@
 
 .checkMeta {
 	display: flex;
-	flex-shrink: 0;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 6px;
 	color: var(--text-3);
+}
+
+.checkLinkIcon {
+	flex-shrink: 0;
+	color: var(--text-3);
+	opacity: 0;
+	transition: opacity var(--transition-fast);
+
+	.checkRow:hover &,
+	.checkRow:focus-visible & {
+		opacity: 1;
+	}
 }
 
 /* Long branch names truncate instead of shattering mid-word; the arrow and
@@ -386,4 +341,206 @@
 
 .created {
 	color: var(--text-2);
+}
+
+.checklistRail {
+	gap: 12px;
+	border: none;
+	background: transparent;
+}
+
+.checklist,
+.panelSections {
+	border: 1px solid var(--border-3);
+	border-radius: var(--radius-card);
+	background-color: var(--bg-1);
+}
+
+.checklist {
+	padding: 14px;
+}
+
+.checklistHeader {
+	display: flex;
+	align-items: baseline;
+	margin-bottom: 8px;
+	gap: 8px;
+}
+
+.checklistHeader h4 {
+	margin: 0;
+	color: var(--text-2);
+	font:
+		10px "Geist Mono",
+		monospace;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.checklistProgress {
+	margin-left: auto;
+	color: var(--text-3);
+	font:
+		10px "Geist Mono",
+		monospace;
+}
+
+.checklistHeadline {
+	display: block;
+	margin-bottom: 10px;
+	font-weight: 600;
+	font-size: 14px;
+	line-height: 1.3;
+	white-space: nowrap;
+}
+
+.checklistHeadline[data-tone="safe"] {
+	color: var(--text-safe);
+}
+.checklistHeadline[data-tone="warn"] {
+	color: var(--text-warn);
+}
+.checklistHeadline[data-tone="danger"] {
+	color: var(--text-danger);
+}
+
+.derivedRows {
+	display: flex;
+	flex-direction: column;
+	margin: 0;
+	padding: 0;
+	gap: 7px;
+	list-style: none;
+}
+
+.readinessRow {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--text-1);
+	font-size: 12px;
+}
+.readinessDot {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	border-radius: var(--radius-full);
+}
+.readinessDot[data-tone="safe"] {
+	background: var(--fill-safe-bg);
+}
+.readinessDot[data-tone="warn"] {
+	background: var(--fill-warn-bg);
+}
+.readinessDot[data-tone="danger"] {
+	background: var(--fill-danger-bg);
+}
+.readinessDot[data-tone="pending"] {
+	border: 1px solid var(--border-1);
+}
+
+.manualItems {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	margin: 12px 0 0;
+	padding: 12px 0 0;
+	gap: 8px;
+	border: none;
+	border-top: 1px solid var(--border-3);
+}
+
+.manualRow {
+	display: flex;
+	position: relative;
+	align-items: center;
+	min-height: 16px;
+	padding-right: 20px;
+	color: var(--text-1);
+	font-size: 12px;
+}
+
+.manualRow[data-checked="true"] {
+	color: var(--text-2);
+}
+
+.manualLabel {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	overflow-wrap: anywhere;
+}
+
+.checklist .manualCheckbox {
+	--checkbox-bg: transparent;
+	position: relative;
+	flex: none;
+	align-self: center;
+	inline-size: 12px;
+	block-size: 12px;
+	border-radius: var(--radius-xs);
+	box-shadow: inset 0 0 0 1px var(--border-1);
+
+	> span {
+		display: none;
+	}
+
+	&[data-checked] {
+		box-shadow: inset 0 0 0 1px var(--fill-pop-bg);
+		&::after {
+			content: "✓";
+			font-size: 9px;
+			line-height: 12px;
+		}
+	}
+}
+
+/* Shown on hover and when reached by keyboard; a checkbox keeping focus after a click
+   must not pin it on screen. */
+.removeItem {
+	position: absolute;
+	right: -4px;
+	opacity: 0;
+	.manualRow:hover &,
+	&:focus-visible {
+		opacity: 1;
+	}
+}
+
+/* The brief calls for an inline text affordance, with button semantics for the keyboard. */
+.addItem {
+	align-self: flex-start;
+	padding: 0;
+	border-bottom: 1px dotted var(--text-3);
+	color: var(--text-2);
+	font-size: 11px;
+}
+
+.addItemForm {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.addItemActions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 4px;
+}
+
+.checklistError {
+	color: var(--text-warn);
+	font-size: 12px;
+}
+
+.manualText {
+	white-space: pre-wrap;
+}
+
+/* A to-do is a line or two, not the six-line minimum the library textarea assumes. */
+.addItemForm .addItemField {
+	min-height: 0;
+	max-height: 8lh;
+	padding-inline: 8px;
+	padding-block: 6px;
 }

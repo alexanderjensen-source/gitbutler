@@ -1,20 +1,23 @@
 import rowStyles from "./Row.module.css";
-import uiStyles from "#ui/components/ui.module.css";
+import { ScrollArea } from "@gitbutler/ui-react/ScrollArea.tsx";
 import { useBranchRemove } from "#ui/api/mutations.ts";
 import { decodeBytes, encodeBytes } from "#ui/api/bytes.ts";
 import { assert } from "#ui/assert.ts";
 import { activeBranchFilterCount, branchIsEmpty, type BranchFilters } from "#ui/branch.ts";
 import { commitIsDiverged, commitTitle } from "#ui/commit.ts";
-import { Badge } from "#ui/components/Badge.tsx";
-import { getButtonClassName } from "#ui/components/Button.tsx";
-import { classes } from "#ui/components/classes.ts";
-import { EmptyState } from "#ui/components/EmptyState.tsx";
+import { Badge, type BadgeVariant } from "@gitbutler/ui-react/Badge.tsx";
+import { Button } from "@gitbutler/ui-react/Button.tsx";
+import { BranchRowHeadline } from "./BranchRowHeadline.tsx";
+import type { IconName } from "@gitbutler/ui-react/iconNames.ts";
+import { classes } from "@gitbutler/ui-react/classes.ts";
+import { EmptyState } from "@gitbutler/ui-react/EmptyState.tsx";
 import {
 	GraphSegment,
 	type GraphSegmentGlyph,
 	type GraphSegmentStatus,
 } from "#ui/components/GraphSegment.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { TextLink } from "@gitbutler/ui-react/TextLink.tsx";
 import { branchesHotkeys, toElectronAccelerator } from "#ui/hotkeys.ts";
 import {
 	nativeMenuItem,
@@ -27,9 +30,9 @@ import { branchAddress, commitAddress, addressIdentityKey, type Address } from "
 import { projectSlice } from "#ui/projects/state.ts";
 import { useAutofocusScope, useAddressSpaceHotkeys, type FocusScope } from "#ui/focus-scopes.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
-import { RelativeTime } from "#ui/components/RelativeTime.tsx";
-import { getRangeExtractorWithIndices } from "#ui/virtual.ts";
-import type { Commit, ListedBranch } from "@gitbutler/but-sdk";
+import { RelativeTime } from "@gitbutler/ui-react/RelativeTime.tsx";
+import { getRangeExtractorWithIndices } from "@gitbutler/ui-react/virtual.ts";
+import type { BranchReviewStatus, Commit, ListedBranch } from "@gitbutler/but-sdk";
 import { Toolbar } from "@base-ui/react";
 import { useMergedRefs } from "@base-ui/utils/useMergedRefs";
 import { useHotkey } from "@tanstack/react-hotkeys";
@@ -40,6 +43,7 @@ import {
 	Fragment,
 	type RefObject,
 	useCallback,
+	useId,
 	useLayoutEffect,
 	useRef,
 	useState,
@@ -59,6 +63,7 @@ import { ListFilterRow } from "./ListFilterRow.tsx";
 import { useListFilter } from "./useListFilter.ts";
 import {
 	getRowButtonClassName,
+	COMMIT_ROW_HEIGHT,
 	treeItemId,
 	useIsSelected as useIsSelectedInList,
 } from "./Row-utils.ts";
@@ -74,6 +79,7 @@ import {
 import { useApplyToWorkspace } from "./useApplyToWorkspace.ts";
 import type { NewBranchActions } from "./useNewBranch.ts";
 import styles from "./BranchesList.module.css";
+import { CommitRowContent } from "./CommitRowContent.tsx";
 
 /** The filter menu, in the order it is shown. */
 const filterMenuLabels: Array<[keyof BranchFilters, string]> = [
@@ -81,6 +87,16 @@ const filterMenuLabels: Array<[keyof BranchFilters, string]> = [
 	["onlyLocal", "Show Only Local Branches"],
 	["onlyStacks", "Show Only Stacks"],
 ];
+
+const reviewStates: Record<
+	BranchReviewStatus,
+	{ label: string; variant: BadgeVariant; icon: IconName }
+> = {
+	open: { label: "Open", variant: "safe", icon: "pr" },
+	draft: { label: "Draft", variant: "lightGray", icon: "pr-draft" },
+	merged: { label: "Merged", variant: "purple", icon: "branch-merge" },
+	closed: { label: "Closed", variant: "danger", icon: "pr-close" },
+};
 
 /**
  * The graph has no remote-only state, so a branch that exists only on a remote
@@ -109,6 +125,7 @@ const CommitItem: FC<{
 	const address = commitAddress({ commitId: commit.id, changeId: commit.changeId });
 	const isSelected = useIsSelected(address);
 	const title = commitTitle(commit.message);
+	const descriptionId = useId();
 	const copyCommit = () =>
 		startKeyboardTransfer({ sources: [address], kind: "copy", placement: "above" });
 	const menuItems: Array<NativeMenuItem> = [
@@ -125,6 +142,7 @@ const CommitItem: FC<{
 			id={treeItemId(address)}
 			role="treeitem"
 			aria-label={title ?? "(no message)"}
+			aria-describedby={descriptionId}
 			aria-level={2}
 			aria-posinset={positionInSet}
 			aria-setsize={setSize}
@@ -138,11 +156,20 @@ const CommitItem: FC<{
 				glyph="commit"
 				status={commitIsDiverged(commit) ? "Diverged" : commit.state.type}
 			/>
-			<RowLabelContainer>
-				<RowLabel singleLine>
-					{title === undefined ? <span className={rowStyles.fadedText}>(no message)</span> : title}
-				</RowLabel>
-			</RowLabelContainer>
+			<CommitRowContent
+				commit={commit}
+				hasConflicts={commit.hasConflicts}
+				descriptionId={descriptionId}
+			/>
+			<Toolbar.Root aria-label="Commit actions" render={<RowToolbar reserveSpace />}>
+				<Toolbar.Button
+					aria-label="Commit menu"
+					onClick={(event) => void showNativeMenuFromTrigger(event.currentTarget, menuItems)}
+					className={getRowButtonClassName({ iconOnly: true })}
+				>
+					<Icon name="kebab" />
+				</Toolbar.Button>
+			</Toolbar.Root>
 		</Row>
 	);
 };
@@ -184,8 +211,7 @@ const BranchCommits: FC<{
 		count: commits?.length ?? 0,
 		getScrollElement: () => scrollElementRef.current,
 		initialOffset: () => scrollElementRef.current?.scrollTop ?? 0,
-		// Keep in sync with --single-line-row-height.
-		estimateSize: () => 28,
+		estimateSize: () => COMMIT_ROW_HEIGHT,
 		getItemKey: getCommitKey,
 		rangeExtractor: rangeExtractorWithSelected,
 		scrollMargin,
@@ -300,6 +326,7 @@ const BranchItem: FC<{
 		) && canUnfold;
 	const isSelected = useIsSelected(address);
 	const [now] = useState(() => Date.now());
+	const descriptionId = useId();
 
 	// Same topology as the applied list: nothing above the branch means the
 	// rail turns in from the right, otherwise it joins the branch above it. This
@@ -308,6 +335,8 @@ const BranchItem: FC<{
 	const railGlyph: GraphSegmentGlyph = isTopBranch ? "forkRight" : "joinRight";
 
 	const review = branch.review;
+	const reviewState = branch.reviewStatus === null ? null : reviewStates[branch.reviewStatus];
+	const createdAt = review?.createdAt != null ? Date.parse(review.createdAt) : Number.NaN;
 
 	const { isPending: isApplyPending, apply } = useApplyToWorkspace(projectId);
 	const { isPending: isBranchRemovePending, mutate: branchRemove } = useBranchRemove(projectId);
@@ -358,6 +387,7 @@ const BranchItem: FC<{
 			id={treeItemId(address)}
 			role="treeitem"
 			aria-label={branch.displayName}
+			aria-describedby={review === null ? undefined : descriptionId}
 			aria-level={1}
 			aria-posinset={positionInSet}
 			aria-setsize={setSize}
@@ -367,6 +397,7 @@ const BranchItem: FC<{
 			aria-expanded={canUnfold ? unfolded : undefined}
 		>
 			<Row
+				className={styles.branchRow}
 				isSelected={isSelected}
 				onSelect={() => setCursor("unapplied", address)}
 				onContextMenu={(event) => {
@@ -385,52 +416,86 @@ const BranchItem: FC<{
 					<GraphSegment glyph={railGlyph} status={branchGraphStatus(branch)} />
 				)}
 
-				<RowLabelGroup>
-					<RowLabelContainer>
-						<RowLabel heading singleLine title={branch.displayName}>
-							{branch.displayName}
-						</RowLabel>
-					</RowLabelContainer>
+				<RowLabelGroup id={descriptionId}>
+					<BranchRowHeadline title={review?.title ?? branch.displayName} labels={review?.labels} />
 
-					<RowMeta>
-						{showsAuthorMeta && (
+					{review !== null && (
+						<RowMeta className={styles.reviewMeta}>
+							{reviewState !== null && (
+								<Badge variant={reviewState.variant}>
+									<Icon name={reviewState.icon} size={12} />
+									{reviewState.label}
+								</Badge>
+							)}
+							<TextLink
+								href={review.htmlUrl}
+								className={styles.reviewLink}
+								aria-label={`Open ${review.unitSymbol}${String(review.number)} in browser`}
+								onClick={(evt) => {
+									evt.preventDefault();
+									void openReviewInBrowser();
+								}}
+							>
+								{review.unitSymbol}
+								{review.number}
+							</TextLink>
+							<span className={classes(rowStyles.fadedText, styles.reviewAuthor)}>
+								{Number.isFinite(createdAt) && (
+									<>
+										opened <RelativeTime timestamp={createdAt} now={now} compact /> ago{" "}
+									</>
+								)}
+								{review.author && <>by {review.author.login}</>}
+							</span>
+						</RowMeta>
+					)}
+
+					<RowMeta className={styles.branchMeta}>
+						{review !== null ? (
 							<span
 								className={classes(
 									rowStyles.fadedText,
 									rowStyles.metaItem,
 									rowStyles.metaItemShrinkable,
 								)}
-								title={branch.lastAuthor?.email}
+								title={branch.displayName}
 							>
-								<span className={rowStyles.metaItemText}>
-									{lastAuthorName !== undefined && <>{lastAuthorName} </>}
-									{branch.updatedAtMs !== null && (
-										<RelativeTime timestamp={branch.updatedAtMs} now={now} />
-									)}
-								</span>
+								<Icon size={12} name="branch" />
+								<span className={rowStyles.metaItemText}>{branch.displayName}</span>
 							</span>
+						) : (
+							showsAuthorMeta && (
+								<span
+									className={classes(
+										rowStyles.fadedText,
+										rowStyles.metaItem,
+										rowStyles.metaItemShrinkable,
+									)}
+									title={branch.lastAuthor?.email}
+								>
+									<span className={rowStyles.metaItemText}>
+										{lastAuthorName !== undefined && (
+											<>
+												{lastAuthorName}
+												{branch.updatedAtMs !== null && " · "}
+											</>
+										)}
+										{branch.updatedAtMs !== null && (
+											<>
+												updated <RelativeTime timestamp={branch.updatedAtMs} now={now} compact />{" "}
+												ago
+											</>
+										)}
+									</span>
+								</span>
+							)
 						)}
 
 						{showsCommitCount && (
 							<>
-								{showsAuthorMeta && <RowMetaSeparator />}
+								{(review !== null || showsAuthorMeta) && <RowMetaSeparator />}
 								<span className={classes(rowStyles.fadedText, rowStyles.metaItem)}>
-									<Icon size={14} name="commit" />
-									{branch.commitCount}
-								</span>
-							</>
-						)}
-
-						{review !== null && (
-							<>
-								{(showsAuthorMeta || showsCommitCount) && <RowMetaSeparator />}
-								<span
-									title={review.title}
-									className={classes(rowStyles.fadedText, rowStyles.metaItem)}
-								>
-									<Icon size={14} name="pr" />
-									{review.unitSymbol}
-									{review.number}
+									{branch.commitCount} {branch.commitCount === 1 ? "commit" : "commits"}
 								</span>
 							</>
 						)}
@@ -439,7 +504,7 @@ const BranchItem: FC<{
 					</RowMeta>
 				</RowLabelGroup>
 
-				<Toolbar.Root aria-label="Branch actions" render={<RowToolbar />}>
+				<Toolbar.Root aria-label="Branch actions" render={<RowToolbar reserveSpace />}>
 					<Toolbar.Button
 						aria-label="Branch menu"
 						onClick={(event) => {
@@ -554,8 +619,9 @@ export const BranchesList: FC<
 		count: stacks.length,
 		getScrollElement: () => scrollElementRef.current,
 		estimateSize: (index) => {
-			// Keep in sync with Row.module.css and StackCard.module.css.
-			const singleLineRowHeight = 28;
+			// Estimate unwrapped titles; measured cards account for titles and labels that wrap.
+			const branchTitleHeight = 34;
+			const reviewMetaHeight = 22;
 			const branchMetaLineHeight = 20;
 			const branchMetaPaddingEnd = 6;
 			const stackBodyPaddingStart = 6;
@@ -565,13 +631,15 @@ export const BranchesList: FC<
 
 			const branchCount = stacks[index]?.branches.length ?? 0;
 			const commitCount = stacks[index]?.commitCount ?? 0;
+			const reviewCount = stacks[index]?.reviewCount ?? 0;
 
 			return (
 				stackBodyPaddingStart +
 				stackBorderHeight +
 				stackFinalConnectorHeight +
-				branchCount * (singleLineRowHeight + branchMetaLineHeight + branchMetaPaddingEnd) +
-				commitCount * singleLineRowHeight +
+				branchCount * (branchTitleHeight + branchMetaLineHeight + branchMetaPaddingEnd) +
+				reviewCount * reviewMetaHeight +
+				commitCount * COMMIT_ROW_HEIGHT +
 				Math.max(0, branchCount - 1) * stackBetweenBranchConnectorHeight
 			);
 		},
@@ -740,10 +808,10 @@ export const BranchesList: FC<
 				<ListFilterRow {...branchFilter.rowProps} />
 			)}
 
-			<div
-				ref={retainScrollElement}
-				className={classes(uiStyles.scroller, styles.list)}
-				data-empty={isEmpty}
+			<ScrollArea
+				viewportRef={retainScrollElement}
+				className={styles.list}
+				viewportClassName={classes(styles.listViewport, isEmpty && styles.listViewportEmpty)}
 			>
 				{/* Loading and failing stay one line where the rows would be: neither
 				    is a surface at rest. An empty list gets the block, and says which
@@ -758,23 +826,19 @@ export const BranchesList: FC<
 						<EmptyState
 							// The binoculars are for a search that came up empty; filters that
 							// hide everything get the same cactus as a list with nothing in it.
-							illustration={query === "" ? "cactus" : "looking"}
+							illustration={query === "" ? "cactus" : "papers"}
 							title="No branches match"
 							description={
 								query === ""
 									? "The filters you have on hide every branch"
 									: isFiltered
-										? `Nothing with “${query}” in its name gets past the filters you have on`
-										: `None of your branches has “${query}” in its name`
+										? `No matches for “${query}” with the current filters`
+										: `No matches for “${query}” in branches or pull requests`
 							}
 						>
-							<button
-								type="button"
-								className={getButtonClassName({ variant: "outline" })}
-								onClick={showAllBranches}
-							>
+							<Button variant="outline" onClick={showAllBranches}>
 								Show all branches
-							</button>
+							</Button>
 						</EmptyState>
 					) : (
 						<EmptyState
@@ -853,7 +917,7 @@ export const BranchesList: FC<
 						);
 					})}
 				</div>
-			</div>
+			</ScrollArea>
 		</div>
 	);
 };

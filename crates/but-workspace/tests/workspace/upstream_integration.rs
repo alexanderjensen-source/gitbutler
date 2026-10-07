@@ -1539,7 +1539,8 @@ fn fully_integrated_single_branch_reparents_workspace_commit_to_advanced_merge_t
 }
 
 #[test]
-fn fully_integrated_direct_checkout_creates_unique_canned_branch_at_target_tip() -> Result<()> {
+fn fully_integrated_direct_checkout_without_local_target_creates_unique_canned_branch() -> Result<()>
+{
     let (_tmp, mut repo, mut meta, _description, mut db) =
         named_writable_scenario_with_description("fully-integrated-single-branch-target-advanced")?;
     force_prefixless_canned_branch_name(&mut repo)?;
@@ -1547,6 +1548,8 @@ fn fully_integrated_direct_checkout_creates_unique_canned_branch_at_target_tip()
     remove_managed_workspace_ref(&repo)?;
     let target_sha = repo.rev_parse_single("main")?.detach();
     let target_tip = repo.rev_parse_single("origin/main")?.detach();
+    // Without a local target, integration must still create a collision-free fallback.
+    git(&repo).args(["branch", "-D", "main"]).run();
     let branch_1: gix::refs::FullName = "refs/heads/branch-1".try_into()?;
     let branch_2: gix::refs::FullName = "refs/heads/branch-2".try_into()?;
 
@@ -1853,7 +1856,8 @@ fn empty_direct_checkout_ignores_same_named_review_for_different_head() -> Resul
 }
 
 #[test]
-fn fully_integrated_direct_checkout_creates_canned_branch_at_merge_target_tip() -> Result<()> {
+fn fully_integrated_direct_checkout_without_local_target_creates_canned_branch_at_merge_tip()
+-> Result<()> {
     let (_tmp, mut repo, mut meta, _description, mut db) =
         named_writable_scenario_with_description(
             "fully-integrated-single-branch-target-advanced-through-merge",
@@ -1863,6 +1867,7 @@ fn fully_integrated_direct_checkout_creates_canned_branch_at_merge_target_tip() 
     remove_managed_workspace_ref(&repo)?;
     let target_sha = repo.rev_parse_single("main")?.detach();
     let target_tip = repo.rev_parse_single("origin/main")?.detach();
+    git(&repo).args(["branch", "-D", "main"]).run();
     let target_tip_parent = repo
         .find_commit(target_tip)?
         .parent_ids()
@@ -3427,18 +3432,18 @@ fn review_hint_integrates_squashed_two_commit_direct_checkout_branch() -> Result
     snapbox::assert_data_eq!(
         graph_workspace(&workspace).to_string(),
         snapbox::str![[r#"
-⌂:amo-branch-1[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-└── ≡:amo-branch-1[🌳] on 3183e43 {1}
-    └── :amo-branch-1[🌳]
-        └── ·56057f2 (✓)
+⌂:main[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
+└── ≡:main[🌳] <> origin/main on 3183e43 {1}
+    └── :main[🌳] <> origin/main
+        └── ❄️56057f2 (✓)
 
 "#]]
     );
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 56057f2 (HEAD -> amo-branch-1, origin/main) squash A
-* 3183e43 (main) M1
+* 56057f2 (HEAD -> main, origin/main) squash A
+* 3183e43 M1
 
 "#]]
     );
@@ -3748,6 +3753,7 @@ fn integrate_and_materialize<M: RefMetadata>(
         rebase,
         ws_meta,
         project_meta,
+        deleted_refs,
     } = integrate_upstream(workspace, meta, current_project_meta, repo, db, updates)?;
     let materialized = rebase.materialize(Default::default())?;
     if let Some(ref_name) = materialized.workspace.ref_name()
@@ -3756,6 +3762,9 @@ fn integrate_and_materialize<M: RefMetadata>(
         let mut md = materialized.meta.workspace(ref_name)?;
         *md = ws_meta;
         materialized.meta.set_workspace(&md)?;
+    }
+    for ref_name in deleted_refs {
+        materialized.meta.remove(ref_name.as_ref())?;
     }
     drop(materialized);
 
@@ -3784,6 +3793,7 @@ fn integrate_with_hints_and_materialize<M: RefMetadata>(
         rebase,
         ws_meta,
         project_meta,
+        deleted_refs,
     } = integrate_upstream_with_hints(
         workspace,
         meta,
@@ -3801,6 +3811,9 @@ fn integrate_with_hints_and_materialize<M: RefMetadata>(
         let mut md = materialized.meta.workspace(ref_name)?;
         *md = ws_meta;
         materialized.meta.set_workspace(&md)?;
+    }
+    for ref_name in deleted_refs {
+        materialized.meta.remove(ref_name.as_ref())?;
     }
     drop(materialized);
 
@@ -3985,6 +3998,230 @@ fn leaves_checked_out_local_target_branch_unchanged() -> Result<()> {
         repo.find_reference("refs/heads/main")?.id().detach(),
         local_id,
         "a checked-out target branch must stay aligned with its worktree"
+    );
+    Ok(())
+}
+
+fn worktree_workspace() -> Result<(
+    tempfile::TempDir,
+    gix::Repository,
+    but_meta::VirtualBranchesTomlMetadata,
+    but_db::DbHandle,
+)> {
+    // Linked worktrees record absolute paths, so the fixture is executed rather than copied.
+    let (repo, tmp) = crate::utils::writable_scenario_slow("worktree-workspace");
+    let mut meta = but_meta::VirtualBranchesTomlMetadata::from_path(
+        repo.path().join("virtual-branches.toml"),
+    )?;
+    crate::ref_info::with_workspace_commit::utils::add_workspace(&mut meta);
+    add_stack(&mut meta, 1, "A", StackState::InWorkspace);
+    add_stack(&mut meta, 2, "B", StackState::InWorkspace);
+    let mut db = but_testsupport::in_memory_db();
+    db.worktree_meta_mut().mark_adopted()?;
+    Ok((tmp, repo, meta, db))
+}
+
+#[test]
+fn worktree_heads_are_collected_as_stack_heads() -> Result<()> {
+    let (_tmp, repo, mut meta, mut db) = worktree_workspace()?;
+
+    let old_target = repo.rev_parse_single("main~1")?.detach();
+    let project_meta = target_project_meta("refs/remotes/origin/main", old_target)?;
+    let graph = but_graph::Graph::from_head(
+        &repo,
+        &meta,
+        project_meta.clone(),
+        &mut db,
+        Options {
+            worktrees: true,
+            ..Options::limited()
+        },
+    )?;
+
+    snapbox::assert_data_eq!(
+        visualize_commit_graph_all(&repo)?,
+        snapbox::str![[r#"
+* 3c0fa35 (disjoint) D1
+*   bae1d9b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+|\  
+| * 19f4fc0 (A) A2
+* | 5881e28 (B) B1
+| | * d175c00 (top) TOP1
+| | * b743926 (mid) MID2
+| | * 0bc05bf MID1
+| |/  
+| | * 53aafe9 (wt-below) U1
+| | | * 4fcfc93 (wt-outside) O1
+| |_|/  
+|/| |   
+| | | * 198b592 (wt-pushed) P2
+| | | * 88c9775 (origin/wt-pushed) P1
+| |_|/  
+|/| |   
+| | | * fc6f8f5 (wt-stacked) S1
+| | | * 6a13321 (wt-inside) W1
+| | |/  
+| |/|   
+| * | 0a62dfe A1
+|/ /  
+* / cad9051 (origin/main, main) M1
+|/  
+* d4d66e2 M0
+
+"#]]
+        .raw()
+    );
+
+    let mut workspace = graph.into_workspace()?;
+    let but_workspace::IntegrateUpstreamOutcome { rebase, .. } = integrate_upstream(
+        &mut workspace,
+        &mut meta,
+        project_meta,
+        &repo,
+        &mut db,
+        vec![BottomUpdate {
+            kind: BottomUpdateKind::Rebase,
+            selector: RelativeTo::Commit(repo.rev_parse_single("wt-below")?.detach()),
+        }],
+    )?;
+    rebase.materialize(Default::default())?;
+
+    // `wt-below` forked from the old target and is only reachable from its worktree's HEAD.
+    snapbox::assert_data_eq!(
+        visualize_commit_graph_all(&repo)?,
+        snapbox::str![[r#"
+* 3c0fa35 (disjoint) D1
+*   bae1d9b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+|\  
+| * 19f4fc0 (A) A2
+* | 5881e28 (B) B1
+| | * d175c00 (top) TOP1
+| | * b743926 (mid) MID2
+| | * 0bc05bf MID1
+| |/  
+| | * 684d673 (wt-below) U1
+| |/  
+|/|   
+| | * 4fcfc93 (wt-outside) O1
+| |/  
+|/|   
+| | * 198b592 (wt-pushed) P2
+| | * 88c9775 (origin/wt-pushed) P1
+| |/  
+|/|   
+| | * fc6f8f5 (wt-stacked) S1
+| | * 6a13321 (wt-inside) W1
+| |/  
+| * 0a62dfe A1
+|/  
+* cad9051 (origin/main, main) M1
+* d4d66e2 M0
+
+"#]]
+        .raw()
+    );
+    assert_eq!(
+        repo.rev_parse_single("wt-below~1")?,
+        repo.rev_parse_single("origin/main")?,
+        "a worktree head is a stack head, so its bottom can be rebased onto the target"
+    );
+    Ok(())
+}
+
+#[test]
+fn integrated_worktree_branches_are_replaced_with_new_ones() -> Result<()> {
+    let (_tmp, repo, mut meta, mut db) = worktree_workspace()?;
+    git(&repo)
+        .args([
+            "update-ref",
+            "refs/remotes/origin/main",
+            "refs/heads/wt-stacked",
+        ])
+        .run();
+    let project_meta = target_project_meta(
+        "refs/remotes/origin/main",
+        repo.rev_parse_single("main")?.detach(),
+    )?;
+    let graph = but_graph::Graph::from_head(
+        &repo,
+        &meta,
+        project_meta.clone(),
+        &mut db,
+        Options {
+            worktrees: true,
+            ..Options::limited()
+        },
+    )?;
+    let mut workspace = graph.into_workspace()?;
+    let but_workspace::IntegrateUpstreamOutcome {
+        rebase,
+        deleted_refs,
+        ..
+    } = integrate_upstream(
+        &mut workspace,
+        &mut meta,
+        project_meta,
+        &repo,
+        &mut db,
+        vec![BottomUpdate {
+            kind: BottomUpdateKind::Rebase,
+            selector: RelativeTo::Commit(repo.rev_parse_single("A~1")?.detach()),
+        }],
+    )?;
+    rebase.materialize(Default::default())?;
+
+    assert_eq!(
+        deleted_refs
+            .iter()
+            .map(|name| name.shorten().to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["wt-inside".to_string(), "wt-stacked".to_string()].into(),
+        "fully integrated worktree branches are gone"
+    );
+    let worktree_head = |name: &str| -> Result<Option<gix::refs::FullName>> {
+        Ok(open_repo(&repo.workdir().expect("non-bare").join(name))?.head_name()?)
+    };
+    let inside = worktree_head("wt-inside")?.expect("still on a branch");
+    let stacked = worktree_head("wt-stacked")?.expect("still on a branch");
+    assert_ne!(inside, stacked, "each worktree gets a branch of its own");
+    for head in [inside, stacked] {
+        assert_eq!(
+            repo.find_reference(&head)?.id(),
+            repo.rev_parse_single("origin/main")?,
+            "the replacement branch starts at the target tip"
+        );
+    }
+    // `mid` forked from the integrated `A1`, so its worktree keeps its branch on the new target.
+    snapbox::assert_data_eq!(
+        visualize_commit_graph_all(&repo)?,
+        snapbox::str![[r#"
+* 3c0fa35 (disjoint) D1
+*   cb64a93 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+|\  
+| * d4becef (A) A2
+* | 5881e28 (B) B1
+| | * d74dbcc (top) TOP1
+| | * ccb6c1d (mid) MID2
+| | * 2c3c6a1 MID1
+| |/  
+| * fc6f8f5 (origin/main, amo-branch-2, amo-branch-1) S1
+| * 6a13321 W1
+| * 0a62dfe A1
+|/  
+| * 53aafe9 (wt-below) U1
+| | * 4fcfc93 (wt-outside) O1
+| |/  
+|/|   
+| | * 198b592 (wt-pushed) P2
+| | * 88c9775 (origin/wt-pushed) P1
+| |/  
+|/|   
+* | cad9051 (main) M1
+|/  
+* d4d66e2 M0
+
+"#]]
+        .raw()
     );
     Ok(())
 }

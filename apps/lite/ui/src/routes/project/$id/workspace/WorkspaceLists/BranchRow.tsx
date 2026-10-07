@@ -21,22 +21,21 @@ import {
 	listReviewsQueryOptions,
 } from "#ui/api/queries.ts";
 import { decodeBytes } from "#ui/api/bytes.ts";
-import { Button, Toolbar, Tooltip } from "@base-ui/react";
+import { Button, Toolbar } from "@base-ui/react";
 import type {
 	BranchReference,
 	InsertSide,
 	PushStatus,
 	RelativeTo,
 	RemoteTrackingReference,
-	Stack,
 } from "@gitbutler/but-sdk";
 import { useQuery } from "@tanstack/react-query";
 import { Match } from "effect";
 import { type ComponentProps, type FC, type MouseEvent, useOptimistic, useTransition } from "react";
-import { classes } from "#ui/components/classes.ts";
+import { classes } from "@gitbutler/ui-react/classes.ts";
 import { GraphSegment, type GraphSegmentStatus } from "#ui/components/GraphSegment.tsx";
-import { Icon } from "#ui/components/Icon.tsx";
-import { TooltipPopup } from "#ui/components/Tooltip.tsx";
+import { Icon } from "@gitbutler/ui-react/Icon.tsx";
+import { Tooltip } from "@gitbutler/ui-react/Tooltip.tsx";
 import { sidebarHotkeys, selectionOperationHotkeys, toElectronAccelerator } from "#ui/hotkeys.ts";
 import {
 	nativeMenuItem,
@@ -52,7 +51,7 @@ import { focusScope } from "#ui/focus-scopes.ts";
 import { getHeadInfoIndex } from "#ui/api/ref-info.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
 import { prForgeUrl } from "#ui/pr.ts";
-import { Badge, type BadgeVariant } from "#ui/components/Badge.tsx";
+import { Badge, type BadgeVariant } from "@gitbutler/ui-react/Badge.tsx";
 import {
 	RowFoldToggle,
 	RowLabel,
@@ -67,11 +66,25 @@ import { toggleFoldedSegment } from "./fold.ts";
 import { InlineEditor } from "./InlineEditor.tsx";
 import { insertBlankCommitMenuItem } from "./insertBlankCommitMenuItem.ts";
 import { ItemRow } from "./ItemRow.tsx";
-import { useStackMenuItems } from "./useStackMenuItems.ts";
+import type { PushActivity } from "./push-activity.ts";
+import { BranchRowHeadline } from "../BranchRowHeadline.tsx";
 import { ciChecksSummaryUrl, type AggregateCIChecks } from "#ui/ci.ts";
-import { type DownstackPushStatus, downstackPushStatusDisabled } from "#ui/segment.ts";
+import {
+	type DownstackPushStatus,
+	downstackPushLabel,
+	downstackPushStatusDisabled,
+} from "#ui/segment.ts";
 
-export type PushActivity = "idle" | "blocked" | "pushing";
+export type BranchLane =
+	| {
+			type: "stack";
+			stackMenuItems: Array<NativeMenuItem>;
+			canTearOff: boolean;
+			canRemove: boolean;
+			canUpdateFromRemote: boolean;
+			bottomRelativeTo: RelativeTo | null;
+	  }
+	| { type: "worktree" };
 
 const CIBubble: FC<{ checks: AggregateCIChecks }> = (p) => {
 	switch (p.checks.status) {
@@ -124,20 +137,18 @@ const CIBubble: FC<{ checks: AggregateCIChecks }> = (p) => {
 export const BranchRow: FC<
 	{
 		projectId: string;
+		descriptionId: string;
 		refName: BranchReference;
-		canTearOffBranch: boolean;
-		canRemoveBranch: boolean;
+		lane: BranchLane;
 		downstackPushStatus: DownstackPushStatus;
 		pushActivity: PushActivity;
 		pushStatus: PushStatus;
-		canUpdateFromRemote: boolean;
 		remote: RemoteTrackingReference | null;
 		/** How many commits the remote has that the branch does not. */
 		incoming: number;
 		/** The segment's projection-recorded review number, if any. */
 		recordedPullRequest: number | null;
 		graphStatus: GraphSegmentStatus;
-		bottomRelativeTo: RelativeTo | null;
 		/** The tick starts the rail, with nothing above it: a lower branch's, or the trunk's, runs on up. */
 		startsRail: boolean;
 		commitCount: number;
@@ -145,28 +156,23 @@ export const BranchRow: FC<
 		railBelow: GraphSegmentStatus;
 		/** Columns of the main line running behind the row, left of its rail. */
 		behind: number;
-		/** The stack this branch sits in, for the stack-wide menu items. */
-		stack: Stack;
 	} & ComponentProps<"div">
 > = ({
 	projectId,
+	descriptionId,
 	refName,
-	canTearOffBranch,
-	canRemoveBranch,
+	lane,
 	downstackPushStatus,
 	pushActivity,
 	pushStatus,
-	canUpdateFromRemote,
 	remote,
 	incoming,
 	recordedPullRequest,
 	graphStatus,
-	bottomRelativeTo,
 	startsRail,
 	commitCount,
 	railBelow,
 	behind,
-	stack,
 	...restProps
 }) => {
 	const { data: forgeInfo } = useQuery(forgeInfoOptions(projectId));
@@ -174,11 +180,13 @@ export const BranchRow: FC<
 		...headInfoQueryOptions(projectId),
 		select: getHeadInfoIndex,
 	});
-	const { data: reviews } = useQuery({
+	// Only this branch's review: the listing refetches on a timer, and a row
+	// should re-render only when its own pull request changes.
+	const { data: openReview } = useQuery({
 		...listReviewsQueryOptions({ projectId, cacheConfig: "noCache" }),
 		enabled: !!forgeInfo?.capabilities.prService,
+		select: (reviews) => reviews.findLast((review) => review.sourceBranch === refName.displayName),
 	});
-	const openReview = reviews?.reviewsBySourceBranch.get(refName.displayName);
 	const openPullRequest = openReview?.number ?? null;
 	// The chip renders the recorded number as-is: the projection only records
 	// display-worthy reviews, the chip must survive being offline, and a
@@ -264,7 +272,9 @@ export const BranchRow: FC<
 
 	const relativeTo: RelativeTo = { type: "referenceBytes", subject: refName.fullNameBytes };
 	const bucketRelativeTo = (side: InsertSide): RelativeTo =>
-		side === "below" && bottomRelativeTo !== null ? bottomRelativeTo : relativeTo;
+		side === "below" && lane.type === "stack" && lane.bottomRelativeTo !== null
+			? lane.bottomRelativeTo
+			: relativeTo;
 
 	const cutBranch = () => {
 		startKeyboardTransfer({ sources: [address], kind: "move" });
@@ -333,13 +343,7 @@ export const BranchRow: FC<
 	const workspaceBranchAndAncestorsPushDisabled =
 		pushActivity !== "idle" || downstackPushStatusDisabled(downstackPushStatus);
 
-	const pushMenuLabel = pushesMultipleBranches
-		? downstackPushStatus.anyPushRequiresForce
-			? "Force Push With Branches Below"
-			: "Push With Branches Below"
-		: downstackPushStatus.anyPushRequiresForce
-			? "Force Push Branch"
-			: "Push Branch";
+	const pushMenuLabel = downstackPushLabel(downstackPushStatus);
 
 	const foldLabel = isFolded ? "Unfold commits" : "Fold commits";
 	const incomingExpanded = useAppSelector((state) =>
@@ -369,16 +373,16 @@ export const BranchRow: FC<
 		// commit sits in this segment. Unrelated selections (and the details pane
 		// they drive) stay put.
 		const commitRef = commitParamRef(currentParams().applied);
-		const storedSegmentRef =
-			commitRef === null
-				? undefined
-				: "changeId" in commitRef
-					? headInfoIndex?.commitContextsByChangeId(commitRef.changeId)?.[0].segment.refName
-					: headInfoIndex?.commitContextByCommitId(commitRef.commitId)?.segment.refName;
+		const commits = headInfoIndex?.laneBranchByRefBytes(refName.fullNameBytes)?.segment.commits;
 		const foldHidesSelection =
 			!isFolded &&
-			storedSegmentRef != null &&
-			decodeBytes(storedSegmentRef.fullNameBytes) === branchRef;
+			commitRef !== null &&
+			commits !== undefined &&
+			commits.some((commit) =>
+				"changeId" in commitRef
+					? commit.changeId === commitRef.changeId
+					: commit.id === commitRef.commitId,
+			);
 
 		toggleFoldedSegment(dispatch, {
 			projectId,
@@ -386,8 +390,6 @@ export const BranchRow: FC<
 			select: foldHidesSelection,
 		});
 	};
-
-	const stackMenuItems = useStackMenuItems(projectId, stack);
 
 	const menuItems: Array<NativeMenuItem> = [
 		nativeMenuItem({
@@ -403,11 +405,15 @@ export const BranchRow: FC<
 			accelerator: toElectronAccelerator(sidebarHotkeys.workspaceBranchAndAncestorsPush.hotkey),
 			onSelect: pushBranch,
 		}),
-		nativeMenuItem({
-			label: "Update From Remote",
-			enabled: canUpdateFromRemote,
-			onSelect: () => openUpdateFromRemote(dispatch, refName.fullNameBytes),
-		}),
+		...(lane.type === "stack"
+			? [
+					nativeMenuItem({
+						label: "Update From Remote",
+						enabled: lane.canUpdateFromRemote,
+						onSelect: () => openUpdateFromRemote(dispatch, refName.fullNameBytes),
+					}),
+				]
+			: []),
 		nativeMenuSeparator,
 		nativeMenuItem({
 			label: "Rename Branch",
@@ -415,11 +421,15 @@ export const BranchRow: FC<
 			accelerator: toElectronAccelerator(sidebarHotkeys.renameBranch.hotkey),
 			onSelect: startEditing,
 		}),
-		nativeMenuItem({
-			label: "Cut Branch",
-			onSelect: cutBranch,
-			accelerator: toElectronAccelerator(selectionOperationHotkeys.cut.hotkey),
-		}),
+		...(lane.type === "stack"
+			? [
+					nativeMenuItem({
+						label: "Cut Branch",
+						onSelect: cutBranch,
+						accelerator: toElectronAccelerator(selectionOperationHotkeys.cut.hotkey),
+					}),
+				]
+			: []),
 		nativeMenuItem({
 			label: "Copy Branch Name",
 			onSelect: () => window.lite.clipboardWriteText(optimisticBranchDisplayName),
@@ -431,40 +441,46 @@ export const BranchRow: FC<
 			accelerator: toElectronAccelerator(sidebarHotkeys.openPRInBrowser.hotkey),
 			onSelect: openPRInBrowser,
 		}),
-		insertBlankCommitMenuItem(insertBlankCommit, "below"),
-		nativeMenuSeparator,
-		nativeMenuItem({
-			label: "Create Branch",
-			submenu: [
-				nativeMenuItem({
-					label: "Above",
-					accelerator: toElectronAccelerator(sidebarHotkeys.createDependentBranchAbove.hotkey),
-					onSelect: () => createDependentBranch("above"),
-				}),
-				nativeMenuItem({
-					label: "Below",
-					onSelect: () => createDependentBranch("below"),
-				}),
-			],
-		}),
-		nativeMenuSeparator,
-		nativeMenuItem({
-			label: "Tear Off Branch",
-			enabled: canTearOffBranch && !isTearOffBranchPending,
-			onSelect: tearOff,
-		}),
-		nativeMenuItem({
-			label: "Delete Branch Reference",
-			enabled: canRemoveBranch && !isBranchRemovePending,
-			accelerator: toElectronAccelerator(sidebarHotkeys.deleteBranchRef.hotkey),
-			onSelect: () =>
-				branchRemove({
-					projectId,
-					refName: refName.fullNameBytes,
-				}),
-		}),
-		nativeMenuSeparator,
-		...stackMenuItems,
+		...(lane.type === "stack"
+			? [
+					insertBlankCommitMenuItem(insertBlankCommit, "below"),
+					nativeMenuSeparator,
+					nativeMenuItem({
+						label: "Create Branch",
+						submenu: [
+							nativeMenuItem({
+								label: "Above",
+								accelerator: toElectronAccelerator(
+									sidebarHotkeys.createDependentBranchAbove.hotkey,
+								),
+								onSelect: () => createDependentBranch("above"),
+							}),
+							nativeMenuItem({
+								label: "Below",
+								onSelect: () => createDependentBranch("below"),
+							}),
+						],
+					}),
+					nativeMenuSeparator,
+					nativeMenuItem({
+						label: "Tear Off Branch",
+						enabled: lane.canTearOff && !isTearOffBranchPending,
+						onSelect: tearOff,
+					}),
+					nativeMenuItem({
+						label: "Delete Branch Reference",
+						enabled: lane.canRemove && !isBranchRemovePending,
+						accelerator: toElectronAccelerator(sidebarHotkeys.deleteBranchRef.hotkey),
+						onSelect: () =>
+							branchRemove({
+								projectId,
+								refName: refName.fullNameBytes,
+							}),
+					}),
+					nativeMenuSeparator,
+					...lane.stackMenuItems,
+				]
+			: []),
 	];
 
 	return (
@@ -477,40 +493,29 @@ export const BranchRow: FC<
 			}}
 		>
 			{commitCount > 0 ? (
-				<Tooltip.Root>
-					<Tooltip.Trigger
-						aria-label={foldLabel}
-						onClick={toggleFolded}
-						render={
-							<RowFoldToggle
-								folded={isFolded}
-								glyph={
-									// The glyph describes where the branch sits in the stack, so it
-									// does not change with fold state.
-									<GraphSegment
-										glyph={startsRail ? "forkRight" : "joinRight"}
-										status={graphStatus}
-										above="LocalOnly"
-										below={railBelow}
-										behind={behind}
-									/>
-								}
-								foldedIndicator={<GraphSegment glyph="group" status={graphStatus} />}
+				<Tooltip
+					content={foldLabel}
+					kbd={sidebarHotkeys.toggleFoldBranch.hotkey}
+					kbdScope="sidebar"
+				>
+					<RowFoldToggle
+						folded={isFolded}
+						glyph={
+							// The glyph describes where the branch sits in the stack, so it
+							// does not change with fold state.
+							<GraphSegment
+								glyph={startsRail ? "forkRight" : "joinRight"}
+								status={graphStatus}
+								above="LocalOnly"
+								below={railBelow}
+								behind={behind}
 							/>
 						}
+						foldedIndicator={<GraphSegment glyph="group" status={graphStatus} />}
+						aria-label={foldLabel}
+						onClick={toggleFolded}
 					/>
-					<Tooltip.Portal>
-						<Tooltip.Positioner sideOffset={4}>
-							<Tooltip.Popup
-								render={
-									<TooltipPopup kbd={sidebarHotkeys.toggleFoldBranch.hotkey} kbdScope="sidebar" />
-								}
-							>
-								{foldLabel}
-							</Tooltip.Popup>
-						</Tooltip.Positioner>
-					</Tooltip.Portal>
-				</Tooltip.Root>
+				</Tooltip>
 			) : (
 				<GraphSegment
 					glyph={startsRail ? "forkRight" : "joinRight"}
@@ -534,56 +539,37 @@ export const BranchRow: FC<
 					onExit={endEditing}
 				/>
 			) : (
-				<RowLabelGroup>
-					<RowLabelContainer>
-						<RowLabel heading singleLine title={optimisticBranchDisplayName}>
-							{optimisticBranchDisplayName}
-						</RowLabel>
-					</RowLabelContainer>
+				<RowLabelGroup id={descriptionId}>
+					{openReview !== undefined ? (
+						<BranchRowHeadline title={openReview.title} labels={openReview.labels} />
+					) : (
+						<RowLabelContainer>
+							<RowLabel heading singleLine title={optimisticBranchDisplayName}>
+								{optimisticBranchDisplayName}
+							</RowLabel>
+						</RowLabelContainer>
+					)}
 
 					<RowMeta>
-						{/* The remote's news in the row itself; the chip opens the commits. */}
-						{remote !== null && incoming > 0 && (
+						{openReview !== undefined && (
 							<>
-								<button
-									type="button"
-									aria-expanded={incomingExpanded}
-									aria-label={`${incomingExpanded ? "Hide" : "Show"} ${String(incoming)} incoming ${incoming === 1 ? "commit" : "commits"} from ${remote.remoteName}/${remote.displayName}`}
+								<span
 									className={classes(
-										getRowButtonClassName({ variant: "ghost" }),
+										rowStyles.fadedText,
 										rowStyles.metaItem,
 										rowStyles.metaItemShrinkable,
 									)}
-									onClick={toggleIncoming}
 								>
-									<Icon size={12} name={incomingExpanded ? "chevron-down" : "chevron-right"} />
-									<span className={rowStyles.metaItemText}>{incomingLabel}</span>
-									{/* Its own flex item: the chip's gap, not a space, parts it from the label. */}
-									<span>+{incoming}</span>
-								</button>
-								<RowMetaSeparator />
-							</>
-						)}
-
-						{/* Only while folded: the count stands in for the commits it hides,
-						    so showing it alongside them would just be noise. */}
-						{isFolded && commitCount > 0 && (
-							<>
-								<span className={classes(rowStyles.fadedText, rowStyles.metaItem)}>
-									<Icon size={14} name="commit" />
-									{commitCount}
+									<Icon name="branch" size={12} />
+									<span className={rowStyles.metaItemText} title={optimisticBranchDisplayName}>
+										{optimisticBranchDisplayName}
+									</span>
 								</span>
 								<RowMetaSeparator />
 							</>
 						)}
 
-						<span
-							className={classes(
-								rowStyles.fadedText,
-								rowStyles.metaItem,
-								rowStyles.metaItemShrinkable,
-							)}
-						>
+						<span className={classes(rowStyles.fadedText, rowStyles.metaItem)}>
 							<span className={rowStyles.metaItemText} title={pushStatusTooltip}>
 								{Match.value(pushStatus).pipe(
 									Match.when("nothingToPush", () => "Nothing to push"),
@@ -598,27 +584,6 @@ export const BranchRow: FC<
 								)}
 							</span>
 						</span>
-
-						{/* The checks belong to the PR, so they ride alongside its label
-						    rather than standing as their own meta item. */}
-						{pullRequest !== null && (
-							<>
-								<RowMetaSeparator />
-								<span className={classes(rowStyles.fadedText, rowStyles.metaItem)}>
-									<Icon size={14} name="pr" />
-									PR
-								</span>
-
-								{ciChecks?.aggregate &&
-									(ciURL != null ? (
-										<a href={ciURL} onClick={(evt) => void openCIChecksInBrowser(evt)}>
-											<CIBubble checks={ciChecks.aggregate} />
-										</a>
-									) : (
-										<CIBubble checks={ciChecks.aggregate} />
-									))}
-							</>
-						)}
 
 						{downstackPushStatus.anyRequiresPush &&
 							(() => {
@@ -642,22 +607,20 @@ export const BranchRow: FC<
 								}${workspaceBranchAndAncestorsPushDisabledReason !== null ? ` (${workspaceBranchAndAncestorsPushDisabledReason})` : ""}`;
 
 								return (
-									<Tooltip.Root>
-										<Tooltip.Trigger
+									<Tooltip
+										content={pushButtonLabel}
+										kbd={sidebarHotkeys.workspaceBranchAndAncestorsPush.hotkey}
+										kbdScope="sidebar"
+									>
+										<Button
 											aria-label={pushButtonLabel}
 											onClick={pushBranch}
 											className={classes(
 												getRowButtonClassName({ variant: "outline" }),
 												rowStyles.metaButton,
 											)}
-											// We pass `disabled` here because we want to disable the button, not
-											// the tooltip. Other props should be passed above.
-											render={
-												<Button
-													focusableWhenDisabled
-													disabled={workspaceBranchAndAncestorsPushDisabled}
-												/>
-											}
+											focusableWhenDisabled
+											disabled={workspaceBranchAndAncestorsPushDisabled}
 										>
 											<span className={rowStyles.metaButtonLabel}>Push</span>
 											{pushActivity === "pushing" ? (
@@ -667,28 +630,62 @@ export const BranchRow: FC<
 											) : (
 												<Icon size={12} name="arrow-up" />
 											)}
-										</Tooltip.Trigger>
-										<Tooltip.Portal>
-											<Tooltip.Positioner sideOffset={4}>
-												<Tooltip.Popup
-													render={
-														<TooltipPopup
-															kbd={sidebarHotkeys.workspaceBranchAndAncestorsPush.hotkey}
-															kbdScope="sidebar"
-														/>
-													}
-												>
-													{pushButtonLabel}
-												</Tooltip.Popup>
-											</Tooltip.Positioner>
-										</Tooltip.Portal>
-									</Tooltip.Root>
+										</Button>
+									</Tooltip>
 								);
 							})()}
 
+						{ciChecks?.aggregate && (
+							<>
+								<RowMetaSeparator />
+								{ciURL != null ? (
+									<a href={ciURL} onClick={(evt) => void openCIChecksInBrowser(evt)}>
+										<CIBubble checks={ciChecks.aggregate} />
+									</a>
+								) : (
+									<CIBubble checks={ciChecks.aggregate} />
+								)}
+							</>
+						)}
+
+						{/* The remote's news in the row itself; the chip opens the commits. */}
+						{remote !== null && incoming > 0 && (
+							<>
+								<RowMetaSeparator />
+								<button
+									type="button"
+									aria-expanded={incomingExpanded}
+									aria-label={`${incomingExpanded ? "Hide" : "Show"} ${String(incoming)} incoming ${incoming === 1 ? "commit" : "commits"} from ${remote.remoteName}/${remote.displayName}`}
+									className={classes(
+										getRowButtonClassName({ variant: "ghost" }),
+										rowStyles.metaItem,
+										rowStyles.metaItemShrinkable,
+									)}
+									onClick={toggleIncoming}
+								>
+									<Icon size={12} name={incomingExpanded ? "chevron-down" : "chevron-right"} />
+									<span className={rowStyles.metaItemText}>{incomingLabel}</span>
+									{/* Its own flex item: the chip's gap, not a space, parts it from the label. */}
+									<span>+{incoming}</span>
+								</button>
+							</>
+						)}
+
+						{/* Only while folded: the count stands in for the commits it hides,
+						    so showing it alongside them would just be noise. */}
+						{isFolded && commitCount > 0 && (
+							<>
+								<RowMetaSeparator />
+								<span className={classes(rowStyles.fadedText, rowStyles.metaItem)}>
+									<Icon size={14} name="commit" />
+									{commitCount}
+								</span>
+							</>
+						)}
+
 						{/* Beside Push rather than in its place: a plain push cannot land
 						    while the remote is ahead, and forcing would drop theirs. */}
-						{remoteLabel !== null && incoming > 0 && (
+						{lane.type === "stack" && remoteLabel !== null && incoming > 0 && (
 							<Button
 								aria-label={`Integrate ${remoteLabel} into ${refName.displayName}`}
 								title={`Bring ${remoteLabel}'s commits into ${refName.displayName}`}
@@ -707,7 +704,7 @@ export const BranchRow: FC<
 			)}
 
 			{noOperationPending && (
-				<Toolbar.Root aria-label="Branch actions" render={<RowToolbar />}>
+				<Toolbar.Root aria-label="Branch actions" render={<RowToolbar reserveSpace />}>
 					<Toolbar.Button
 						aria-label="Branch menu"
 						onClick={(event) => {

@@ -40,6 +40,24 @@ git init only-remote-advanced
   add_main_remote_setup
 )
 
+git init single-branch-in-sync
+(cd single-branch-in-sync
+  commit M
+  setup_remote_tracking main
+  add_main_remote_setup
+)
+
+cp -R single-branch-in-sync single-branch-empty-feature
+(cd single-branch-empty-feature
+  git checkout -b feature
+)
+
+cp -R single-branch-empty-feature single-branch-empty-feature-with-upstream
+(cd single-branch-empty-feature-with-upstream
+  setup_remote_tracking feature
+  git branch --set-upstream-to=origin/feature feature
+)
+
 git init ad-hoc-branch-integrated-upstream
 (cd ad-hoc-branch-integrated-upstream
   commit M1
@@ -974,11 +992,24 @@ EOF
     git checkout gitbutler/workspace
   )
 
+  cp -R no-target-without-ws-commit-ambiguous no-target-without-ws-commit-ambiguous-ahead
+  (cd no-target-without-ws-commit-ambiguous-ahead
+    # Keep A and B at A2, with both local commits above A's upstream.
+    git update-ref refs/remotes/origin/A main
+  )
+
   cp -R no-target-without-ws-commit-ambiguous no-target-without-ws-commit-ambiguous-with-remotes
   (cd no-target-without-ws-commit-ambiguous-with-remotes
     add_main_remote_setup
     remote_tracking_caught_up A
     remote_tracking_caught_up B
+  )
+
+  cp -R no-target-without-ws-commit-ambiguous-with-remotes no-target-without-ws-commit-ambiguous-with-remotes-ahead
+  (cd no-target-without-ws-commit-ambiguous-with-remotes-ahead
+    # Both upstreams are below the shared local tip, keeping both branch associations visible.
+    git update-ref refs/remotes/origin/A main
+    git update-ref refs/remotes/origin/B main
   )
 
   git init no-target-with-ws-commit
@@ -1400,6 +1431,28 @@ EOF
     git checkout main
     create_workspace_commit_once main
     git worktree add ../worktree-ahead-checkout-feature wt-feature
+  )
+
+  # The worktree fork predates the target, beyond its normal traversal allowance.
+  git init worktree-behind-target
+  (cd worktree-behind-target
+    commit init
+    tick
+    commit base
+    git branch wt-feature
+    for n in $(seq 1 6); do
+      tick
+      commit "M$n"
+    done
+    setup_target_to_match_main
+    create_workspace_commit_once main
+    git worktree add ../worktree-behind-target-feature wt-feature
+    (cd ../worktree-behind-target-feature
+      tick
+      commit W1
+      tick
+      commit W2
+    )
   )
 
   git init target-shared-with-unapplied-and-origin-head

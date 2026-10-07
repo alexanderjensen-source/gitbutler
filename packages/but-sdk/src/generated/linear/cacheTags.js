@@ -11,6 +11,7 @@ export const apiProvides = {
 	commentsList: ["Comments"],
 	commitConflicts: [],
 	commitDetailsWithLineStats: ["Commits"],
+	commitRangeDiff: ["Commits"],
 	currentForgeLogin: ["ForgeLogin"],
 	editChangesFromInitial: ["WorktreeChanges"],
 	editInitialIndexState: ["OperatingMode"],
@@ -35,6 +36,7 @@ export const apiProvides = {
 	listReviewerCandidates: ["ReviewerCandidates"],
 	listReviews: ["Reviews"],
 	listSnapshots: ["Workspace"],
+	newReviewTarget: ["Workspace", "Reviews"],
 	operatingMode: ["OperatingMode"],
 	treeChangeDiffs: ["Diffs"],
 	treeChangeDiffsFromSource: ["Diffs"],
@@ -84,6 +86,7 @@ export const apiInvalidates = {
 	updateReviewComment: ["ReviewComments"],
 	withdrawReviewRequest: ["Reviews"],
 	workspaceBranchAndAncestorsPush: ["Workspace", "Reviews", "MergeStatus", "Checks", "ReviewTimeline"],
+	worktreeNew: ["Worktrees", "Workspace"],
 	worktreeRemove: ["Worktrees", "Workspace"],
 	worktreeSetArchived: ["Worktrees", "Workspace"],
 };
