@@ -9,10 +9,15 @@ function shellQuote(value: string): string {
 	return `'${escaped}'`;
 }
 
-/** Resumes the branch's Claude session, or starts one named after the branch. */
+/**
+ * Resumes the branch's Claude session if one with that name exists, otherwise starts one
+ * named after the branch. The existence check is a non-interactive `--resume`, which fails
+ * fast with "does not match any session title" when there's no such session.
+ */
 function claudeCommand(branchName: string): string {
 	const name = shellQuote(branchName);
-	return `claude --resume ${name} || claude --name ${name}`;
+	const noSuchSession = `claude -p --resume ${name} </dev/null 2>&1 | grep -q 'does not match any session'`;
+	return `if ${noSuchSession}; then claude --name ${name}; else claude --resume ${name}; fi`;
 }
 
 /**
