@@ -77,6 +77,8 @@ url = "2.5.4"
 but-path.workspace = true
 tauri-plugin-deep-link = "2"
 document-features = { version = "0.2", optional = true }
+portable-pty = "0.9.0"
+uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-trafficlights-positioner = { git = "https://github.com/gitbutlerapp/tauri-plugin-trafficlights-positioner", branch = "v2" }

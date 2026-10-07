@@ -228,6 +228,14 @@ export class StackController {
 		return this.isSelectionPreviewOpen || this.hasStagedFileFocused;
 	}
 
+	get isTerminalOpen(): boolean {
+		return !!this.laneState.terminalOpen.current;
+	}
+
+	toggleTerminal(): void {
+		this.laneState.terminalOpen.set(!this.isTerminalOpen);
+	}
+
 	closePreview(): void {
 		if (this.activeSelectionId) {
 			this.fileSelection.clear(this.activeSelectionId);

@@ -52,6 +52,7 @@ import { ShortcutService, SHORTCUT_SERVICE } from "$lib/shortcuts/shortcutServic
 import { StackService, STACK_SERVICE } from "$lib/stacks/stackService.svelte";
 import { ClientState, CLIENT_STATE } from "$lib/state/clientState.svelte";
 import { UiState, UI_STATE, uiStateSlice } from "$lib/state/uiState.svelte";
+import { PtyService, PTY_SERVICE } from "$lib/terminal/terminalService";
 import DataSharingService, { DATA_SHARING_SERVICE } from "$lib/support/dataSharing";
 import { EVENT_CONTEXT, EventContext } from "$lib/telemetry/eventContext";
 import { POSTHOG_WRAPPER, PostHogWrapper } from "$lib/telemetry/posthog";
@@ -143,6 +144,7 @@ export function initDependencies(args: {
 	const projectsService = new ProjectsService(clientState.backendApi, homeDir, backend);
 	const gitConfig = new GitConfigService(clientState.backendApi, clientState.dispatch, backend);
 	const terminalService = new TerminalService(backend);
+	const ptyService = new PtyService(backend);
 
 	// ============================================================================
 	// AI SERVICES
@@ -333,6 +335,7 @@ export function initDependencies(args: {
 		[POSTHOG_WRAPPER, posthog],
 		[PROJECTS_SERVICE, projectsService],
 		[PROMPT_SERVICE, promptService],
+		[PTY_SERVICE, ptyService],
 		[REMOTES_SERVICE, remotesService],
 		[RESIZE_SYNC, resizeSync],
 		[SECRET_SERVICE, secretsService],

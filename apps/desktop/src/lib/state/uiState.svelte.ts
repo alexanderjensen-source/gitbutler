@@ -48,6 +48,7 @@ export type NewCommitMessage = {
 export type StackState = {
 	selection: StackSelection | undefined;
 	newCommitMessage: NewCommitMessage;
+	terminalOpen: boolean;
 };
 
 export type ExclusiveAction =
@@ -208,6 +209,7 @@ export class UiState {
 	readonly lane = this.buildScopedProps<StackState>(this.scopesCache.lanes, {
 		selection: undefined,
 		newCommitMessage: { title: "", description: "" },
+		terminalOpen: false,
 	});
 
 	/** Properties scoped to a specific project. */
