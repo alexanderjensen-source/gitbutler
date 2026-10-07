@@ -1,9 +1,17 @@
 <script lang="ts">
 	import CollapseStackButton from "$components/branch/CollapseStackButton.svelte";
 	import { MODE_SERVICE } from "$lib/mode/modeService";
+	import { getStackContext } from "$lib/stacks/stackController.svelte";
 	import { STACK_SERVICE } from "$lib/stacks/stackService.svelte";
+	import { PTY_SERVICE } from "$lib/terminal/terminalService";
 	import { inject } from "@gitbutler/core/context";
-	import { ContextMenuItem, ContextMenuSection, Icon, KebabButton } from "@gitbutler/ui-svelte";
+	import {
+		Button,
+		ContextMenuItem,
+		ContextMenuSection,
+		Icon,
+		KebabButton,
+	} from "@gitbutler/ui-svelte";
 	import type { Stack } from "$lib/stacks/stack";
 
 	type Props = {
@@ -19,6 +27,8 @@
 
 	const stackService = inject(STACK_SERVICE);
 	const modeService = inject(MODE_SERVICE);
+	const ptyService = inject(PTY_SERVICE);
+	const controller = getStackContext();
 
 	// Get all stacks to determine if we can move left/right
 	const stacksQuery = $derived(stackService.stacks(projectId));
@@ -87,6 +97,7 @@
 				projectId,
 				stackId,
 			});
+			await ptyService.killLane(controller.laneId);
 		} finally {
 			// Always refetch to clear stale stacks from the UI,
 			// even if the unapply failed (e.g. branch already removed).
@@ -101,6 +112,15 @@
 	<div class="drag-handle-icon">
 		<Icon name="drag-horizontal" />
 	</div>
+
+	<Button
+		kind="ghost"
+		icon="terminal"
+		size="tag"
+		tooltip={controller.isTerminalOpen ? "Hide terminal" : "Show terminal"}
+		activated={controller.isTerminalOpen}
+		onclick={() => controller.toggleTerminal()}
+	/>
 
 	<KebabButton minimal>
 		{#snippet contextMenu({ close })}

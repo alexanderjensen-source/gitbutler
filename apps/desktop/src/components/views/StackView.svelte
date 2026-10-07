@@ -1,6 +1,7 @@
 <script lang="ts">
 	import AppScrollableContainer from "$components/shared/AppScrollableContainer.svelte";
 	import Resizer from "$components/shared/Resizer.svelte";
+	import StackTerminal from "$components/terminal/StackTerminal.svelte";
 	import StackDetails from "$components/views/StackDetails.svelte";
 	import StackPanel from "$components/views/StackPanel.svelte";
 	import { type Stack } from "$lib/stacks/stack";
@@ -119,38 +120,49 @@
 		},
 	}}
 >
-	<AppScrollableContainer childrenWrapHeight="100%" enableDragScroll>
-		<div
-			class="stack-view"
-			class:details-open={isDetailsOpen}
-			style:width="{$persistedStackWidth}rem"
-			data-fade-on-reorder
-			use:focusable={{
-				vertical: true,
-				onActive: (value) => (controller.active = value),
-			}}
-			bind:this={stackViewEl}
-		>
-			<StackPanel {segments} {topBranchName} {onFoldStack} />
-
-			<!-- RESIZE PANEL 1 -->
-			{#if stackViewEl}
-				<Resizer
-					persistId="ui-stack-width-${controller.stackId}"
-					viewport={stackViewEl}
-					zIndex="var(--z-lifted)"
-					direction="right"
-					minWidth={PANEL1_RESIZER.minWidth}
-					maxWidth={PANEL1_RESIZER.maxWidth}
-					defaultValue={$persistedStackWidth ?? PANEL1_RESIZER.defaultValue}
-					syncName="panel1"
-					onWidth={(newWidth) => {
-						persistedStackWidth.set(newWidth);
+	<div class="stack-column">
+		<div class="stack-column__scroll">
+			<AppScrollableContainer childrenWrapHeight="100%" enableDragScroll>
+				<div
+					class="stack-view"
+					class:details-open={isDetailsOpen}
+					style:width="{$persistedStackWidth}rem"
+					data-fade-on-reorder
+					use:focusable={{
+						vertical: true,
+						onActive: (value) => (controller.active = value),
 					}}
-				/>
-			{/if}
+					bind:this={stackViewEl}
+				>
+					<StackPanel {segments} {topBranchName} {onFoldStack} />
+
+					<!-- RESIZE PANEL 1 -->
+					{#if stackViewEl}
+						<Resizer
+							persistId="ui-stack-width-${controller.stackId}"
+							viewport={stackViewEl}
+							zIndex="var(--z-lifted)"
+							direction="right"
+							minWidth={PANEL1_RESIZER.minWidth}
+							maxWidth={PANEL1_RESIZER.maxWidth}
+							defaultValue={$persistedStackWidth ?? PANEL1_RESIZER.defaultValue}
+							syncName="panel1"
+							onWidth={(newWidth) => {
+								persistedStackWidth.set(newWidth);
+							}}
+						/>
+					{/if}
+				</div>
+			</AppScrollableContainer>
 		</div>
-	</AppScrollableContainer>
+
+		<!-- TERMINAL PANEL -->
+		{#if controller.isTerminalOpen}
+			<div style:width="{$persistedStackWidth}rem">
+				<StackTerminal />
+			</div>
+		{/if}
+	</div>
 
 	<!-- DETAILS PANEL -->
 	{#if isDetailsOpen}
@@ -174,6 +186,17 @@
 		&:focus {
 			outline: none;
 		}
+	}
+
+	.stack-column {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+	}
+
+	.stack-column__scroll {
+		flex: 1;
+		min-height: 0;
 	}
 
 	.stack-view {
