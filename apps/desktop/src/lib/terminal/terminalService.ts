@@ -1,31 +1,44 @@
 import { InjectionToken } from "@gitbutler/core/context";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
 import type { IBackend } from "$lib/backend";
+import type { DiskStore } from "$lib/backend/backend";
 
 export const PTY_SERVICE = new InjectionToken<PtyService>("PtyService");
+
+const HISTORY_FILE = "terminal-history.json";
+const HISTORY_LINES = 1000;
+const SAVE_INTERVAL_MS = 2000;
+const RESTORED_MARKER = "\x1b[2m— restored from previous session —\x1b[0m\r\n";
 
 export type LaneTerminal = {
 	terminalId: string;
 	term: Terminal;
 	fit: FitAddon;
-	dispose: () => void;
+	/** Saves history, then tears down the screen and its listeners (not the shell). */
+	dispose: () => Promise<void>;
 };
 
 /**
  * Owns one shell + xterm screen per lane. Both outlive the component that shows them,
- * so folding a lane or hiding the panel keeps the session and its scrollback intact.
+ * so folding a lane or hiding the panel keeps the session intact. Scrollback is also
+ * saved to disk under `historyKey`, and replayed above a fresh shell after an app restart.
  */
 export class PtyService {
 	/** Lane ID → session. In-memory only: shells don't survive an app restart. */
 	private readonly sessions = new Map<string, Promise<LaneTerminal>>();
+	private historyStore: Promise<DiskStore> | undefined;
 
 	constructor(private readonly backend: IBackend) {}
 
-	session(laneId: string, cwd: string): Promise<LaneTerminal> {
+	session(
+		laneId: string,
+		params: { cwd: string; historyKey?: string; startupCommand?: string },
+	): Promise<LaneTerminal> {
 		let session = this.sessions.get(laneId);
 		if (!session) {
-			session = this.spawn(cwd);
+			session = this.spawn(params);
 			this.sessions.set(laneId, session);
 			session.catch(() => this.sessions.delete(laneId));
 		}
@@ -37,15 +50,58 @@ export class PtyService {
 		if (!session) return;
 		this.sessions.delete(laneId);
 		const { terminalId, dispose } = await session;
-		dispose();
+		await dispose();
 		// The shell may already have exited on its own, in which case the backend no longer knows it.
 		await this.backend.invoke("kill_terminal", { terminalId }).catch(() => {});
 	}
 
-	private async spawn(cwd: string): Promise<LaneTerminal> {
+	private history(): Promise<DiskStore> {
+		this.historyStore ??= this.backend.loadDiskStore(HISTORY_FILE);
+		return this.historyStore;
+	}
+
+	private async spawn({
+		cwd,
+		historyKey,
+		startupCommand,
+	}: {
+		cwd: string;
+		historyKey?: string;
+		/** Typed into the new shell, so the shell remains once the command exits. */
+		startupCommand?: string;
+	}): Promise<LaneTerminal> {
 		const term = new Terminal({ cursorBlink: true, fontSize: 12 });
 		const fit = new FitAddon();
+		const serializer = new SerializeAddon();
 		term.loadAddon(fit);
+		term.loadAddon(serializer);
+
+		if (historyKey) {
+			const saved = await (await this.history()).get<string>(historyKey, undefined);
+			if (saved) term.write(`${saved}\r\n${RESTORED_MARKER}`);
+		}
+
+		let saveTimer: ReturnType<typeof setTimeout> | undefined;
+		const save = async () => {
+			clearTimeout(saveTimer);
+			saveTimer = undefined;
+			if (!historyKey) return;
+			// Skip the alternate screen and terminal modes so a restore can't leave the new shell
+			// stuck in a full-screen app's display state.
+			const snapshot = serializer.serialize({
+				scrollback: HISTORY_LINES,
+				excludeAltBuffer: true,
+				excludeModes: true,
+			});
+			await (await this.history()).set(historyKey, snapshot);
+		};
+		// Throttled rather than debounced, so a continuously streaming program still gets saved.
+		const scheduleSave = () => {
+			if (!historyKey || saveTimer) return;
+			saveTimer = setTimeout(() => {
+				save().catch((error: unknown) => console.error("Failed to save terminal history", error));
+			}, SAVE_INTERVAL_MS);
+		};
 
 		const terminalId = await this.backend.invoke<string>("spawn_terminal", {
 			cwd,
@@ -55,11 +111,15 @@ export class PtyService {
 
 		const unlistenOutput = this.backend.listen<{ data: string }>(
 			`terminal://${terminalId}/output`,
-			(event) => term.write(event.payload.data),
+			(event) => {
+				term.write(event.payload.data);
+				scheduleSave();
+			},
 		);
-		const unlistenExit = this.backend.listen(`terminal://${terminalId}/exit`, () =>
-			term.write("\r\n[process exited]\r\n"),
-		);
+		const unlistenExit = this.backend.listen(`terminal://${terminalId}/exit`, async () => {
+			term.write("\r\n[process exited]\r\n");
+			await save();
+		});
 		const input = term.onData(
 			async (data) => await this.backend.invoke("write_to_terminal", { terminalId, data }),
 		);
@@ -68,13 +128,17 @@ export class PtyService {
 				await this.backend.invoke("resize_terminal", { terminalId, cols, rows }),
 		);
 
+		if (startupCommand) {
+			await this.backend.invoke("write_to_terminal", { terminalId, data: `${startupCommand}\r` });
+		}
+
 		return {
 			terminalId,
 			term,
 			fit,
-			dispose: () => {
-				unlistenOutput();
-				unlistenExit();
+			dispose: async () => {
+				await save();
+				await Promise.all([unlistenOutput(), unlistenExit()]);
 				input.dispose();
 				resize.dispose();
 				term.dispose();

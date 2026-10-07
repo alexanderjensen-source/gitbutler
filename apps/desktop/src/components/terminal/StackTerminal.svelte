@@ -5,6 +5,8 @@
 	import { Button } from "@gitbutler/ui-svelte";
 	import "@xterm/xterm/css/xterm.css";
 
+	const { branchName }: { branchName: string | undefined } = $props();
+
 	const controller = getStackContext();
 
 	let panelEl = $state<HTMLDivElement>();
@@ -13,6 +15,7 @@
 	const terminal = useTerminal({
 		projectId: () => controller.projectId,
 		laneId: () => controller.laneId,
+		branchName: () => branchName,
 		container: () => terminalEl,
 	});
 </script>
