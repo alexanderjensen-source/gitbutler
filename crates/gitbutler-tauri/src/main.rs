@@ -18,7 +18,7 @@ use but_api::{
 };
 use but_settings::AppSettingsWithDiskSync;
 use gitbutler_tauri::{
-    WindowState, askpass, csp::csp_with_extras, env, logs, menu, projects, settings, zip,
+    WindowState, askpass, csp::csp_with_extras, env, logs, menu, projects, pty, settings, zip,
 };
 use tauri::{Emitter, Manager, generate_context};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -172,6 +172,7 @@ fn main() -> anyhow::Result<()> {
                 };
                 app_handle.manage(archival);
                 app_handle.manage(app_settings);
+                app_handle.manage(pty::PtyRegistry::default());
 
                 tauri_app.on_menu_event(move |handle, event| {
                     let target_window = handle
@@ -348,6 +349,10 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(unix)]
                 legacy::workspace::tauri_show_graph_svg::show_graph_svg,
                 askpass::submit_prompt_response,
+                pty::spawn_terminal,
+                pty::write_to_terminal,
+                pty::resize_terminal,
+                pty::kill_terminal,
                 projects::list_projects,
                 projects::server_capabilities,
                 projects::set_project_active,
@@ -418,7 +423,11 @@ fn main() -> anyhow::Result<()> {
         builder
             .build(tauri_context)
             .expect("Failed to build tauri app")
-            .run(|_app_handle, _event| {});
+            .run(|app_handle, event| {
+                if let tauri::RunEvent::Exit = event {
+                    app_handle.state::<pty::PtyRegistry>().kill_all();
+                }
+            });
     });
     Ok(())
 }

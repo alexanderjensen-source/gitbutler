@@ -80,6 +80,8 @@
 	"dependencies": {
 		"@tauri-apps/plugin-clipboard-manager": "^2.3.2",
 		"@tauri-apps/plugin-deep-link": "~2.4.9",
+		"@xterm/addon-fit": "^0.11.0",
+		"@xterm/xterm": "^6.0.0",
 		"dayjs": "^1.11.20",
 		"ollama": "^0.6.3",
 		"openai": "^6.32.0",
