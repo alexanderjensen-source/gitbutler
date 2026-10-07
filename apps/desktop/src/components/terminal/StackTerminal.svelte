@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Resizer from "$components/shared/Resizer.svelte";
+	import FloatingModal from "$lib/floating/FloatingModal.svelte";
 	import { getStackContext } from "$lib/stacks/stackController.svelte";
 	import { useTerminal } from "$lib/terminal/useTerminal.svelte";
 	import { Button } from "@gitbutler/ui-svelte";
@@ -8,10 +9,13 @@
 	const { branchName }: { branchName: string | undefined } = $props();
 
 	const controller = getStackContext();
+	const poppedOut = $derived(controller.isTerminalPoppedOut);
 
 	let panelEl = $state<HTMLDivElement>();
+	let headerEl = $state<HTMLDivElement>();
 	let terminalEl = $state<HTMLDivElement>();
 
+	// Docking/undocking swaps `terminalEl`; the hook moves the live screen into the new one.
 	const terminal = useTerminal({
 		projectId: () => controller.projectId,
 		laneId: () => controller.laneId,
@@ -20,10 +24,19 @@
 	});
 </script>
 
-<div class="stack-terminal" bind:this={panelEl}>
-	<div class="stack-terminal__header">
-		<span class="text-12 text-semibold">Terminal</span>
+{#snippet header()}
+	<div class="stack-terminal__header" class:draggable={poppedOut} bind:this={headerEl}>
+		<span class="text-12 text-semibold truncate">
+			{poppedOut && branchName ? `Terminal · ${branchName}` : "Terminal"}
+		</span>
 		<div class="stack-terminal__actions">
+			<Button
+				kind="ghost"
+				icon={poppedOut ? "pop-out-top-left" : "pop-out-bottom-right"}
+				size="tag"
+				tooltip={poppedOut ? "Dock terminal" : "Pop out terminal"}
+				onclick={() => controller.toggleTerminalPopout()}
+			/>
 			<Button
 				kind="ghost"
 				icon="refresh"
@@ -43,19 +56,42 @@
 			/>
 		</div>
 	</div>
-	<div class="stack-terminal__body" bind:this={terminalEl}></div>
+{/snippet}
 
-	{#if panelEl}
-		<Resizer
-			viewport={panelEl}
-			direction="up"
-			persistId="ui-stack-terminal-height"
-			defaultValue={16}
-			minHeight={8}
-			maxHeight={48}
-		/>
-	{/if}
-</div>
+{#if poppedOut}
+	<FloatingModal
+		persistId="floating-terminal-size"
+		dragHandleElement={headerEl}
+		defaults={{
+			snapPosition: "bottom-right",
+			width: 720,
+			height: 420,
+			minWidth: 360,
+			minHeight: 200,
+		}}
+	>
+		<div class="stack-terminal popped-out">
+			{@render header()}
+			<div class="stack-terminal__body" bind:this={terminalEl}></div>
+		</div>
+	</FloatingModal>
+{:else}
+	<div class="stack-terminal" bind:this={panelEl}>
+		{@render header()}
+		<div class="stack-terminal__body" bind:this={terminalEl}></div>
+
+		{#if panelEl}
+			<Resizer
+				viewport={panelEl}
+				direction="up"
+				persistId="ui-stack-terminal-height"
+				defaultValue={16}
+				minHeight={8}
+				maxHeight={48}
+			/>
+		{/if}
+	</div>
+{/if}
 
 <style lang="postcss">
 	.stack-terminal {
@@ -69,6 +105,14 @@
 		border: 1px solid var(--border-2);
 		border-radius: var(--radius-m);
 		background-color: var(--bg-1);
+
+		&.popped-out {
+			flex: 1;
+			height: auto;
+			margin: 0;
+			border: none;
+			border-radius: 0;
+		}
 	}
 
 	.stack-terminal__header {
@@ -76,12 +120,18 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 4px 4px 4px 10px;
+		gap: 8px;
 		border-bottom: 1px solid var(--border-2);
 		color: var(--text-2);
+
+		&.draggable {
+			cursor: grab;
+		}
 	}
 
 	.stack-terminal__actions {
 		display: flex;
+		flex-shrink: 0;
 		gap: 2px;
 	}
 

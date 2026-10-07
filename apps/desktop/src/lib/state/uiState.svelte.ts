@@ -49,6 +49,7 @@ export type StackState = {
 	selection: StackSelection | undefined;
 	newCommitMessage: NewCommitMessage;
 	terminalOpen: boolean;
+	terminalPoppedOut: boolean;
 };
 
 export type ExclusiveAction =
@@ -210,6 +211,7 @@ export class UiState {
 		selection: undefined,
 		newCommitMessage: { title: "", description: "" },
 		terminalOpen: false,
+		terminalPoppedOut: false,
 	});
 
 	/** Properties scoped to a specific project. */

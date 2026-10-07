@@ -236,6 +236,14 @@ export class StackController {
 		this.laneState.terminalOpen.set(!this.isTerminalOpen);
 	}
 
+	get isTerminalPoppedOut(): boolean {
+		return !!this.laneState.terminalPoppedOut.current;
+	}
+
+	toggleTerminalPopout(): void {
+		this.laneState.terminalPoppedOut.set(!this.isTerminalPoppedOut);
+	}
+
 	closePreview(): void {
 		if (this.activeSelectionId) {
 			this.fileSelection.clear(this.activeSelectionId);
