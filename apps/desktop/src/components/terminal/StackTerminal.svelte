@@ -32,8 +32,11 @@
 				kind="ghost"
 				icon="cross"
 				size="tag"
-				tooltip="Hide terminal"
-				onclick={() => controller.toggleTerminal()}
+				tooltip="Close terminal"
+				onclick={async () => {
+					controller.toggleTerminal();
+					await terminal.close();
+				}}
 			/>
 		</div>
 	</div>
