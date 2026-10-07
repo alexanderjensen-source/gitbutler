@@ -159,7 +159,7 @@
 		<!-- TERMINAL PANEL -->
 		{#if controller.isTerminalOpen}
 			<div style:width="{$persistedStackWidth}rem">
-				<StackTerminal />
+				<StackTerminal branchName={topBranchName} />
 			</div>
 		{/if}
 	</div>
