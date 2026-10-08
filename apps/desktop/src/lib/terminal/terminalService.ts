@@ -26,29 +26,26 @@ export type LaneTerminal = {
  * saved to disk under `historyKey`, and replayed above a fresh shell after an app restart.
  */
 export class PtyService {
-	/** Lane ID → session. In-memory only: shells don't survive an app restart. */
+	/** `projectId/branchName` → session. In-memory only: shells don't survive an app restart. */
 	private readonly sessions = new Map<string, Promise<LaneTerminal>>();
 	private historyStore: Promise<DiskStore> | undefined;
 
 	constructor(private readonly backend: IBackend) {}
 
-	session(
-		laneId: string,
-		params: { cwd: string; historyKey?: string; startupCommand?: string },
-	): Promise<LaneTerminal> {
-		let session = this.sessions.get(laneId);
+	session(key: string, params: { cwd: string; startupCommand?: string }): Promise<LaneTerminal> {
+		let session = this.sessions.get(key);
 		if (!session) {
-			session = this.spawn(params);
-			this.sessions.set(laneId, session);
-			session.catch(() => this.sessions.delete(laneId));
+			session = this.spawn({ ...params, historyKey: key });
+			this.sessions.set(key, session);
+			session.catch(() => this.sessions.delete(key));
 		}
 		return session;
 	}
 
-	async killLane(laneId: string): Promise<void> {
-		const session = this.sessions.get(laneId);
+	async kill(key: string): Promise<void> {
+		const session = this.sessions.get(key);
 		if (!session) return;
-		this.sessions.delete(laneId);
+		this.sessions.delete(key);
 		const { terminalId, dispose } = await session;
 		await dispose();
 		// The shell may already have exited on its own, in which case the backend no longer knows it.
@@ -66,7 +63,7 @@ export class PtyService {
 		startupCommand,
 	}: {
 		cwd: string;
-		historyKey?: string;
+		historyKey: string;
 		/** Typed into the new shell, so the shell remains once the command exits. */
 		startupCommand?: string;
 	}): Promise<LaneTerminal> {
@@ -76,16 +73,13 @@ export class PtyService {
 		term.loadAddon(fit);
 		term.loadAddon(serializer);
 
-		if (historyKey) {
-			const saved = await (await this.history()).get<string>(historyKey, undefined);
-			if (saved) term.write(`${saved}\r\n${RESTORED_MARKER}`);
-		}
+		const saved = await (await this.history()).get<string>(historyKey, undefined);
+		if (saved) term.write(`${saved}\r\n${RESTORED_MARKER}`);
 
 		let saveTimer: ReturnType<typeof setTimeout> | undefined;
 		const save = async () => {
 			clearTimeout(saveTimer);
 			saveTimer = undefined;
-			if (!historyKey) return;
 			// Skip the alternate screen and terminal modes so a restore can't leave the new shell
 			// stuck in a full-screen app's display state.
 			const snapshot = serializer.serialize({
@@ -97,7 +91,7 @@ export class PtyService {
 		};
 		// Throttled rather than debounced, so a continuously streaming program still gets saved.
 		const scheduleSave = () => {
-			if (!historyKey || saveTimer) return;
+			if (saveTimer) return;
 			saveTimer = setTimeout(() => {
 				save().catch((error: unknown) => console.error("Failed to save terminal history", error));
 			}, SAVE_INTERVAL_MS);

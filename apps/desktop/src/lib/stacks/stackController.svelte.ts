@@ -44,6 +44,7 @@ export class StackController {
 	private getProjectId: () => string;
 	private getStackId: () => string | undefined;
 	private getLaneId: () => string;
+	private getBranchNames: () => string[];
 
 	active = $state(false);
 	visibleRange = $state<{ start: number; end: number } | undefined>();
@@ -58,12 +59,14 @@ export class StackController {
 		projectId: () => string;
 		stackId: () => string | undefined;
 		laneId: () => string;
+		branchNames: () => string[];
 	}) {
 		this.uiState = inject(UI_STATE);
 		this.fileSelection = inject(FILE_SELECTION_MANAGER);
 		this.getProjectId = params.projectId;
 		this.getStackId = params.stackId;
 		this.getLaneId = params.laneId;
+		this.getBranchNames = params.branchNames;
 
 		$effect(() => {
 			const store = this.focusedFileStore;
@@ -226,6 +229,10 @@ export class StackController {
 
 	get isDetailsViewOpen(): boolean {
 		return this.isSelectionPreviewOpen || this.hasStagedFileFocused;
+	}
+
+	get branchNames(): string[] {
+		return this.getBranchNames();
 	}
 
 	get isTerminalOpen(): boolean {

@@ -39,6 +39,8 @@
 		projectId: () => projectId,
 		stackId: () => stackId,
 		laneId: () => laneId,
+		branchNames: () =>
+			segments.flatMap((segment) => (segment.refName ? [segment.refName.displayName] : [])),
 	});
 	setStackContext(controller);
 

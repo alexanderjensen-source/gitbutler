@@ -3,6 +3,11 @@ import { PROJECTS_SERVICE } from "$lib/project/projectsService";
 import { PTY_SERVICE } from "$lib/terminal/terminalService";
 import { inject } from "@gitbutler/core/context";
 
+/** One shell, one history, one Claude session per branch. */
+export function sessionKey(projectId: string, branchName: string): string {
+	return `${projectId}/${branchName}`;
+}
+
 /** POSIX single-quoting: branch names may legally contain `;`, `$`, `&`, etc. */
 function shellQuote(value: string): string {
 	const escaped = value.replaceAll("'", String.raw`'\''`);
@@ -26,8 +31,7 @@ function claudeCommand(branchName: string): string {
  */
 export function useTerminal(params: {
 	projectId: () => string;
-	laneId: () => string;
-	/** The lane's top branch; scrollback is saved per branch, so it survives unapply and re-apply. */
+	/** The branch whose shell this shows; each branch in a stack gets its own. */
 	branchName: () => string | undefined;
 	container: () => HTMLElement | undefined;
 }) {
@@ -40,10 +44,11 @@ export function useTerminal(params: {
 
 	$effect(() => {
 		const container = params.container();
-		const laneId = params.laneId();
 		const projectId = params.projectId();
+		const branchName = params.branchName();
 		void generation;
-		if (!container) return;
+		if (!container || !branchName) return;
+		const branch: string = branchName;
 
 		let disposed = false;
 		let detach: (() => void) | undefined;
@@ -51,12 +56,9 @@ export function useTerminal(params: {
 		async function attach(target: HTMLElement) {
 			const project = await projectsService.fetchProject(projectId);
 			if (disposed || !project) return;
-			// Read after the await so a branch rename doesn't re-run this effect.
-			const branchName = params.branchName();
-			const { term, fit } = await ptyService.session(laneId, {
+			const { term, fit } = await ptyService.session(sessionKey(projectId, branch), {
 				cwd: project.path,
-				historyKey: branchName ? `${projectId}/${branchName}` : undefined,
-				startupCommand: branchName && autoStartClaude ? claudeCommand(branchName) : undefined,
+				startupCommand: autoStartClaude ? claudeCommand(branch) : undefined,
 			});
 			if (disposed) return;
 
@@ -89,11 +91,11 @@ export function useTerminal(params: {
 
 	return {
 		async restart() {
-			await ptyService.killLane(params.laneId());
+			await ptyService.kill(sessionKey(params.projectId(), params.branchName() ?? ""));
 			generation++;
 		},
 		async close() {
-			await ptyService.killLane(params.laneId());
+			await ptyService.kill(sessionKey(params.projectId(), params.branchName() ?? ""));
 		},
 	};
 }

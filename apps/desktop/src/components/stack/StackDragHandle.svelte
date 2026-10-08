@@ -3,6 +3,7 @@
 	import { MODE_SERVICE } from "$lib/mode/modeService";
 	import { getStackContext } from "$lib/stacks/stackController.svelte";
 	import { STACK_SERVICE } from "$lib/stacks/stackService.svelte";
+	import { sessionKey } from "$lib/terminal/useTerminal.svelte";
 	import { PTY_SERVICE } from "$lib/terminal/terminalService";
 	import { inject } from "@gitbutler/core/context";
 	import {
@@ -97,7 +98,9 @@
 				projectId,
 				stackId,
 			});
-			await ptyService.killLane(controller.laneId);
+			for (const branchName of controller.branchNames) {
+				await ptyService.kill(sessionKey(projectId, branchName));
+			}
 		} finally {
 			// Always refetch to clear stale stacks from the UI,
 			// even if the unapply failed (e.g. branch already removed).

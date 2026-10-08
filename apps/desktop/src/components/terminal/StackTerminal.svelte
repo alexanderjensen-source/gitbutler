@@ -6,10 +6,14 @@
 	import { Button } from "@gitbutler/ui-svelte";
 	import "@xterm/xterm/css/xterm.css";
 
-	const { branchName }: { branchName: string | undefined } = $props();
+	const { branchName: topBranchName }: { branchName: string | undefined } = $props();
 
 	const controller = getStackContext();
 	const poppedOut = $derived(controller.isTerminalPoppedOut);
+	const branchNames = $derived(controller.branchNames);
+
+	let selectedBranch = $state<string | undefined>();
+	const branchName = $derived(selectedBranch ?? topBranchName);
 
 	let panelEl = $state<HTMLDivElement>();
 	let headerEl = $state<HTMLDivElement>();
@@ -18,7 +22,6 @@
 	// Docking/undocking swaps `terminalEl`; the hook moves the live screen into the new one.
 	const terminal = useTerminal({
 		projectId: () => controller.projectId,
-		laneId: () => controller.laneId,
 		branchName: () => branchName,
 		container: () => terminalEl,
 	});
@@ -26,9 +29,21 @@
 
 {#snippet header()}
 	<div class="stack-terminal__header" class:draggable={poppedOut} bind:this={headerEl}>
-		<span class="text-12 text-semibold truncate">
-			{poppedOut && branchName ? `Terminal · ${branchName}` : "Terminal"}
-		</span>
+		{#if branchNames.length > 1}
+			<select
+				class="text-12 stack-terminal__branch"
+				value={branchName}
+				onchange={(event) => (selectedBranch = event.currentTarget.value)}
+			>
+				{#each branchNames as name (name)}
+					<option value={name}>{name}</option>
+				{/each}
+			</select>
+		{:else}
+			<span class="text-12 text-semibold truncate">
+				{poppedOut && branchName ? `Terminal · ${branchName}` : "Terminal"}
+			</span>
+		{/if}
 		<div class="stack-terminal__actions">
 			<Button
 				kind="ghost"
@@ -127,6 +142,15 @@
 		&.draggable {
 			cursor: grab;
 		}
+	}
+
+	.stack-terminal__branch {
+		min-width: 0;
+		padding: 2px 4px;
+		border: 1px solid var(--border-2);
+		border-radius: var(--radius-s);
+		background: var(--bg-2);
+		color: var(--text-1);
 	}
 
 	.stack-terminal__actions {
