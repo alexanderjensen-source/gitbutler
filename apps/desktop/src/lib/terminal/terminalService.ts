@@ -16,6 +16,10 @@ export type LaneTerminal = {
 	terminalId: string;
 	term: Terminal;
 	fit: FitAddon;
+	/** Tells the shell the screen's current size; call after fitting, since a resize event only fires on change. */
+	syncSize: () => Promise<void>;
+	/** Runs the startup command, once. Call after the first fit so it starts at the real size. */
+	start: () => Promise<void>;
 	/** Saves history, then tears down the screen and its listeners (not the shell). */
 	dispose: () => Promise<void>;
 };
@@ -103,10 +107,21 @@ export class PtyService {
 			rows: term.rows,
 		});
 
+		// The DOM renderer sometimes leaves rows stale after a full-screen UI redraws in place (cursor
+		// moves in a choice list); a full repaint, like docking or resizing triggers, clears it.
+		let repaintFrame: number | undefined;
+		const scheduleRepaint = () => {
+			if (repaintFrame !== undefined) return;
+			repaintFrame = requestAnimationFrame(() => {
+				repaintFrame = undefined;
+				if (term.element) term.refresh(0, term.rows - 1);
+			});
+		};
+
 		const unlistenOutput = this.backend.listen<{ data: string }>(
 			`terminal://${terminalId}/output`,
 			(event) => {
-				term.write(event.payload.data);
+				term.write(event.payload.data, scheduleRepaint);
 				scheduleSave();
 			},
 		);
@@ -117,22 +132,38 @@ export class PtyService {
 		const input = term.onData(
 			async (data) => await this.backend.invoke("write_to_terminal", { terminalId, data }),
 		);
-		const resize = term.onResize(
-			async ({ cols, rows }) =>
-				await this.backend.invoke("resize_terminal", { terminalId, cols, rows }),
-		);
+		// Resizes are chained: concurrent IPC calls can be applied out of order, leaving the PTY
+		// at a stale size that disagrees with the screen (output then overprints the last line).
+		let resizeQueue: Promise<void> = Promise.resolve();
+		const syncSize = () => {
+			const { cols, rows } = term;
+			resizeQueue = resizeQueue
+				.then(() => this.backend.invoke<void>("resize_terminal", { terminalId, cols, rows }))
+				.catch((error: unknown) => console.warn("Failed to resize terminal", terminalId, error));
+			return resizeQueue;
+		};
+		const resize = term.onResize(() => void syncSize());
 
-		if (startupCommand) {
-			await this.backend.invoke("write_to_terminal", { terminalId, data: `${startupCommand}\r` });
-		}
+		// Held back until the screen has been fitted: a program that starts at the spawn-time default
+		// size and is resized afterwards draws with line counts that no longer match what xterm shows.
+		let pendingStartup = startupCommand;
+		const start = async () => {
+			if (!pendingStartup) return;
+			const data = `${pendingStartup}\r`;
+			pendingStartup = undefined;
+			await this.backend.invoke("write_to_terminal", { terminalId, data });
+		};
 
 		return {
 			terminalId,
 			term,
 			fit,
+			syncSize,
+			start,
 			dispose: async () => {
 				await save();
 				await Promise.all([unlistenOutput(), unlistenExit()]);
+				if (repaintFrame !== undefined) cancelAnimationFrame(repaintFrame);
 				input.dispose();
 				resize.dispose();
 				term.dispose();

@@ -162,6 +162,10 @@
 	.stack-terminal__body {
 		flex: 1;
 		min-height: 0;
-		padding: 4px 0 0 8px;
+
+		/* FitAddon subtracts padding on the xterm element, not on its parent, so pad here. */
+		& :global(.xterm) {
+			padding: 4px 0 0 8px;
+		}
 	}
 </style>

@@ -56,7 +56,7 @@ export function useTerminal(params: {
 		async function attach(target: HTMLElement) {
 			const project = await projectsService.fetchProject(projectId);
 			if (disposed || !project) return;
-			const { term, fit } = await ptyService.session(sessionKey(projectId, branch), {
+			const { term, fit, syncSize, start } = await ptyService.session(sessionKey(projectId, branch), {
 				cwd: project.path,
 				startupCommand: autoStartClaude ? claudeCommand(branch) : undefined,
 			});
@@ -66,6 +66,11 @@ export function useTerminal(params: {
 			if (term.element) target.appendChild(term.element);
 			else term.open(target);
 			fit.fit();
+			// Re-parenting, or a first fit at an unchanged size, fires no resize event.
+			// The command goes out only once the PTY has the real size.
+			syncSize()
+				.then(start)
+				.catch((error: unknown) => console.error("Failed to start terminal command", error));
 			term.refresh(0, term.rows - 1);
 			term.focus();
 

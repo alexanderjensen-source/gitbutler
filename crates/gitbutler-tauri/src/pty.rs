@@ -63,6 +63,37 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// Takes the longest decodable prefix of `pending` and leaves a trailing, incomplete character
+/// in place for the next read. A multibyte character split across reads would otherwise become
+/// replacement characters, widening the line and desyncing cursor movement in full-screen UIs.
+/// Bytes that are invalid outright become U+FFFD.
+fn drain_utf8(pending: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                out.push_str(valid);
+                pending.clear();
+                return out;
+            }
+            Err(err) => {
+                let valid_up_to = err.valid_up_to();
+                out.push_str(&String::from_utf8_lossy(&pending[..valid_up_to]));
+                match err.error_len() {
+                    None => {
+                        pending.drain(..valid_up_to);
+                        return out;
+                    }
+                    Some(invalid_len) => {
+                        out.push(char::REPLACEMENT_CHARACTER);
+                        pending.drain(..valid_up_to + invalid_len);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn default_shell() -> String {
     if cfg!(windows) {
         "powershell.exe".into()
@@ -113,8 +144,13 @@ pub fn spawn_terminal(
     let id = terminal_id.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut pending = Vec::new();
         while let Ok(n @ 1..) = reader.read(&mut buf) {
-            let data = String::from_utf8_lossy(&buf[..n]).into_owned();
+            pending.extend_from_slice(&buf[..n]);
+            let data = drain_utf8(&mut pending);
+            if data.is_empty() {
+                continue;
+            }
             app.emit(&format!("terminal://{id}/output"), PtyOutputEvent { data })
                 .ok();
         }
