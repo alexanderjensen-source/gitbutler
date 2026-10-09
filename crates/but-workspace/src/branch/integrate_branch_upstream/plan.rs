@@ -12,7 +12,7 @@ use but_error::bail_precondition;
 use but_rebase::{
     commit::DateMode,
     graph_rebase::{
-        Editor, LookupStep, Selector, Step,
+        Editor, Selector, Step,
         merge_commit_changes::MergeCommitChangesOutcome,
         mutate::{SegmentDelimiter, SelectorSet},
     },
@@ -297,6 +297,7 @@ fn prepare_squash_step_for_editor<M: RefMetadata>(
         .repo()
         .merge_base_octopus(ordered_commit_ids.iter().copied())
         .context("failed to compute squash merge-base")?
+        .context("Could not find a merge-base for the commits to squash")?
         .detach();
 
     let tip_commit_id = *ordered_commit_ids
@@ -453,13 +454,10 @@ fn disconnect_and_make_mutable_if_existing<M: RefMetadata>(
         // The integration rebuilds this commit onto new parents, so it must be
         // cherry-picked. Reused upstream commits live in immutable segments
         // (they aren't reachable from HEAD), so force them mutable here.
-        let mut step = editor.lookup_step(existing)?;
-        if let Step::Pick(pick) = &mut step
-            && !pick.mutable
-        {
+        editor.update_pick(existing, |_editor, mut pick| {
             pick.mutable = true;
-            editor.replace(existing, step)?;
-        }
+            Ok(pick)
+        })?;
         return Ok(());
     }
 

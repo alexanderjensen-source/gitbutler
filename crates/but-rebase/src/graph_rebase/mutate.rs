@@ -8,7 +8,7 @@ use petgraph::{Direction, algo::has_path_connecting, visit::EdgeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
-    Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
+    Checkout, Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
 };
 
 /// Describes where relative to the selector a step should be inserted
@@ -333,23 +333,61 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(references)
     }
 
-    /// Replaces the node that the function was pointing to.
-    ///
-    /// If a commit step has been replaced with another commit step, the commit
-    /// mappings will get updated to include an entry going from the old to the
-    /// new object id.
-    ///
-    /// Returns the replaced step.
-    pub fn replace(&mut self, target: impl ToSelector, mut step: Step) -> Result<Step> {
+    /// Replaces the step described by `target` with a new mutable [Step::Reference] step.
+    pub fn replace_reference(
+        &mut self,
+        target: impl ToReferenceSelector,
+        refname: gix::refs::FullName,
+    ) -> Result<()> {
+        let target = self
+            .history
+            .normalize_selector(target.to_reference_selector(self)?)?;
+        self.graph[target.id] = Step::new_reference(refname);
+        Ok(())
+    }
+
+    /// Replaces the step with [Step::None].
+    pub fn replace_with_none(&mut self, target: impl ToSelector) -> Result<Step> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
-        if let (Step::Pick(from), Step::Pick(to)) = (&self.graph[target.id], &step)
-            && !from.exclude_from_tracking
-            && !to.exclude_from_tracking
-        {
-            self.history.update_mapping(from.id, to.id);
-        };
+        let mut step = Step::None;
         std::mem::swap(&mut self.graph[target.id], &mut step);
         Ok(step)
+    }
+
+    /// Updates the pick to another pick and records a commit mapping.
+    ///
+    /// The function also receives a reference to self to work around borrow checker issues.
+    pub fn update_pick<F>(&mut self, target: impl ToCommitSelector, f: F) -> Result<()>
+    where
+        F: FnOnce(&Self, Pick) -> Result<Pick>,
+    {
+        let target = self
+            .history
+            .normalize_selector(target.to_commit_selector(self)?)?;
+        let Step::Pick(from) = self.graph[target.id].clone() else {
+            bail!("BUG: to_commit_selector should have asserted Step::Pick");
+        };
+        let from_id = if from.exclude_from_tracking {
+            None
+        } else {
+            Some(from.id)
+        };
+        let to = f(self, from)?;
+        if let Some(from_id) = from_id
+            && !to.exclude_from_tracking
+        {
+            self.history.update_mapping(from_id, to.id);
+        }
+        self.graph[target.id] = Step::Pick(to);
+        Ok(())
+    }
+
+    /// Convenience function to amend a pick.
+    pub fn amend_pick(&mut self, target: impl ToCommitSelector, id: gix::ObjectId) -> Result<()> {
+        self.update_pick(target, |_editor, mut pick| {
+            pick.id = id;
+            Ok(pick)
+        })
     }
 
     /// Disconnect a segment from a parent segment.
@@ -575,6 +613,16 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         }
     }
 
+    fn move_checkouts(&mut self, from: Selector, to: Selector) -> Result<()> {
+        for checkout in &mut self.checkouts {
+            let (Checkout::Head { selector, .. } | Checkout::Worktree { selector, .. }) = checkout;
+            if self.history.normalize_selector(*selector)?.id == from.id {
+                *selector = to;
+            }
+        }
+        Ok(())
+    }
+
     /// Insert a segment relative to a selector.
     ///
     /// `target` - Selector to insert the segment relative to.
@@ -595,7 +643,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// If `nodes_to_connect` is None:
     ///     If inserted above, all the target selector's children will be disconnected and reconnected to the last
-    ///     node of the segment. If inserted below, all the target selector's parents will be disconnected and
+    ///     node of the segment. A checkout of the target is among what sat on it and moves to that node as
+    ///     well, so the segment's branch becomes the checked-out one. If inserted below, all the target selector's parents will be disconnected and
     ///     reconnected to the parent-most node of the segment using `parent_reparenting_order`.
     /// If `nodes_to_connect` is Some:
     ///     If inserted above, connect the given nodes as children. If inserted below, connect the given nodes as parents
@@ -669,6 +718,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         };
                         self.graph.add_edge(edge_source, child.id, new_weight);
                     }
+                    self.move_checkouts(target, child)?;
                 }
 
                 // Connect the target to the parent-most node in the given segment according to
@@ -729,7 +779,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// The segment is described by its delimiter: First (parent-most) and last (child-most) node.
     ///
     /// If inserted above, all the target selector's children will be disconnected and reconnected to the last
-    /// node of the segment.
+    /// node of the segment, and so is a checkout of the target.
     /// If inserted below, all the target selector's parents will be disconnected and reconnected to the
     /// parent-most node of the segment.
     ///
@@ -768,7 +818,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Inserts a new node relative to a selector
     ///
     /// When inserting above, any nodes that point to the selector will now
-    /// point to the inserted node instead. When inserting below, any nodes
+    /// point to the inserted node instead, and so does a checkout of the
+    /// selector. When inserting below, any nodes
     /// that the selector points to will now be pointed to by the inserted node
     /// instead.
     ///
@@ -796,7 +847,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     self.graph.add_edge(edge_source, new_idx, edge_weight);
                 }
 
-                Ok(self.new_selector(new_idx))
+                let inserted = self.new_selector(new_idx);
+                self.move_checkouts(target, inserted)?;
+                Ok(inserted)
             }
             InsertSide::Below => {
                 let edges = self

@@ -82,6 +82,9 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             };
             mutable_entrypoints.push(segment.id);
         }
+        for tip in worktree_tips.iter().filter(|tip| tip.ref_name.is_none()) {
+            mutable_entrypoints.push(workspace.graph.segment_id_by_commit_id(tip.id)?);
+        }
 
         // Segments reachable from a mutable entrypoint (following parent edges)
         // may be rewritten. Every other segment is still included in the
@@ -400,7 +403,8 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
     /// This is the normalization path for callers that want to chain
     /// additional editor-based operations and need the editor graph plus
     /// in-memory repository to agree on ancestry.
-    pub fn into_editor(self) -> Editor<'ws, 'meta, M> {
+    pub fn into_editor(mut self) -> Editor<'ws, 'meta, M> {
+        self.history.conflicted_commits.clear();
         Editor {
             graph: self.graph,
             initial_references: self.initial_references,

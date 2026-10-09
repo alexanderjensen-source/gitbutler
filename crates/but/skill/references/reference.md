@@ -305,7 +305,12 @@ branch may be moved at a time. Source order does not matter. For a branch source
 `--unstack` apply; `--below` and `-b <name>` require commit or committed-change sources. `--branch`
 with no value is equivalent to `--unstack`. With the experimental worktree flag on, `-b` also
 accepts a branch in a worktree's lane, moving commit or committed-change sources onto that
-branch's tip (nothing is created); a branch source is refused there.
+branch's tip (nothing is created). A branch source stacks on top of it, leaving the workspace for
+the worktree; stacked onto the branch the worktree has checked out (`--above` that branch or the
+worktree), it becomes what the worktree has checked out. A
+worktree's branches are branch sources too, and stacking one on a workspace branch brings it into
+the workspace. Moving the branch the worktree has checked out leaves the worktree on the branch
+below it, or detached on the commit it was based on when there is none.
 
 For commits or committed changes, add `-b <new-name>` to `--above <branch>`, `--below <branch>`,
 or `--unstack` to name the new branch; omit it for a generated name. This does not rename an
@@ -465,13 +470,18 @@ turn the completed Git push into a failure.
 
 ### `but pull`
 
-Update applied branches onto the latest target branch changes (usually `main`).
+Update applied branches and linked worktrees onto the latest target branch changes (usually `main`).
 Use this for "get latest from main" in a GitButler workspace.
 
 ```bash
-but pull                      # Fetch and rebase applied branches
+but pull                      # Fetch and rebase applied branches and linked worktrees
 but pull --check              # Dry-run preview: report what would happen, change nothing
+but pull --update=workspace   # Leave worktrees based on the target alone
+but pull --update=worktrees   # Rebase only the worktrees based on the target
 ```
+
+`--update` takes a comma-separated list and defaults to `worktrees,workspace`. A worktree based on
+an applied branch shares that branch's commits, so it is rebased with `workspace`.
 
 Run `but pull` directly for a straightforward update; its output reports the result and `but undo`
 reverts it. Use `--check` first when the user or repository policy requires a preview without

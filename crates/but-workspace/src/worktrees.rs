@@ -17,7 +17,7 @@ pub use but_graph::workspace::WorktreeBase;
 #[cfg(feature = "worktree-cow")]
 use gix::utils::AsBStr;
 
-use crate::ref_info::{LocalCommit, Segment};
+use crate::ref_info::{Lane, LocalCommit, Segment};
 
 /// A non-archived linked worktree along with the first-parent history it owns exclusively,
 /// i.e. the segments between its `HEAD` and the workspace, an earlier worktree, or the target.
@@ -40,6 +40,31 @@ pub struct WorktreeInfo {
 }
 
 impl WorktreeInfo {
+    /// What the worktree rests on, if that is the target and it has a branch or commits of its
+    /// own to rebase there.
+    pub fn rebasable_base(&self) -> Option<gix::ObjectId> {
+        match self.base {
+            Some(WorktreeBase::Outside(base))
+                if self.ref_name.is_some() || self.commits().next().is_some() =>
+            {
+                Some(base)
+            }
+            _ => None,
+        }
+    }
+
+    /// The worktree as a lane, which rests on another lane only when based inside the workspace.
+    pub fn lane(&self) -> Lane<'_> {
+        Lane {
+            segments: &self.segments,
+            rests_on: match self.base {
+                Some(WorktreeBase::InWorkspace(id)) => Some(id),
+                Some(WorktreeBase::Outside(_)) | None => None,
+            },
+            worktree: Some(self.name.as_ref()),
+        }
+    }
+
     /// The commits owned by this worktree alone, from its `HEAD` down to (excluding) its
     /// [base](Self::base), along the first parent.
     pub fn commits(&self) -> impl Iterator<Item = &LocalCommit> {
@@ -57,7 +82,7 @@ pub fn open_worktree_repo(repo: &gix::Repository, name: &BStr) -> anyhow::Result
     let proxy = repo
         .worktrees()?
         .into_iter()
-        .find(|proxy| proxy.id() == name)
+        .find(|proxy| proxy.id().is_ok_and(|id| id == name))
         .with_context(|| format!("Worktree {name} does not exist"))?;
     proxy.into_repo().map_err(Into::into)
 }
@@ -127,7 +152,7 @@ fn add_inner(
     if path.exists() {
         bail!("'{}' already exists", path.display());
     }
-    let short_name = gix::path::from_bstr(branch.shorten());
+    let short_name = gix::path::from_bstr(branch.shorten())?;
     let base = base.to_string();
 
     let mut args = vec![];
@@ -145,7 +170,9 @@ fn add_inner(
     git_worktree(repo, "add", &args)?;
     gix::open(path)?
         .worktree()
-        .and_then(|worktree| worktree.id().map(ToOwned::to_owned))
+        .map(|worktree| worktree.id().map(|id| id.map(ToOwned::to_owned)))
+        .transpose()?
+        .flatten()
         .context("git registered the new checkout as a linked worktree")
 }
 

@@ -32,8 +32,11 @@ use crate::{
     theme::{self, Theme},
     utils::{
         CliOutput, CliOutputHuman, IntermediateChannel, WriteWithUtils,
-        diff_specs::DiffSpecBuilder, merged_upstream::MergedUpstream,
-        single_branch_mode::SingleBranchMode, targeting::Side, worktrees::worktree_tip_target,
+        diff_specs::DiffSpecBuilder,
+        merged_upstream::MergedUpstream,
+        single_branch_mode::SingleBranchMode,
+        targeting::Side,
+        worktrees::{worktree_branch, worktree_tip_target},
     },
 };
 
@@ -443,7 +446,11 @@ pub struct StackBranchOnOperation {
 
 impl StackBranchOnOperation {
     fn execute(self, tx: &mut Transaction<'_, '_, impl RefMetadata>) -> anyhow::Result<()> {
-        tx.stack_branch_on(self.source_branch.as_ref(), self.target_branch.as_ref())
+        tx.move_branch(
+            self.source_branch.as_ref(),
+            RelativeTo::Reference(self.target_branch),
+            Side::Above.into(),
+        )
     }
 }
 
@@ -551,7 +558,7 @@ fn resolve(
     } = args;
 
     let context_lines = ctx.settings.context_lines;
-    let (repo, ws, _db) = ctx.workspace_and_db_mut_with_perm(perm.read_permission())?;
+    let (repo, ws, _db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
 
     let resolved_sources = resolve_sources(&repo, context_lines, id_map, sources)?;
 
@@ -586,21 +593,6 @@ fn resolve(
                             .arg_name("--branch")
                             .arg_value(branch.to_string())
                             .into());
-                    }
-                    // Stacking targets live in the workspace; refusing beats a misleading
-                    // "not found".
-                    if ws
-                        .find_segment_and_stack_by_refname(target.as_ref())
-                        .is_none()
-                        && ws.refname_is_segment(target.as_ref())
-                    {
-                        return Err(bad_input(format!(
-                            "Cannot stack a branch onto worktree branch {}",
-                            theme::Branch(&*branch.0)
-                        ))
-                        .arg_name("--branch")
-                        .arg_value(branch.to_string())
-                        .into());
                     }
                     Ok(MoveOperation::StackBranch(StackBranchOnOperation {
                         source_branch: source,
@@ -787,8 +779,17 @@ fn create_move_above_or_below_op(
                 bad_input("Cannot use `-b/--branch` when moving relative to worktrees").into(),
             );
         }
-        MoveTarget::BranchTip {
-            name: worktree_tip_target(repo, name.as_ref(), side, &unresolved_target)?,
+        match (&resolved_sources, side) {
+            // Above what a worktree has checked out, a branch becomes its checkout.
+            (ResolvedSources::Branch(_), Side::Above) => MoveTarget::BranchBucket {
+                name: worktree_branch(repo, name.as_ref())
+                    .map_err(|err| bad_input(err.to_string()))?,
+                side,
+                new_branch_name: None,
+            },
+            _ => MoveTarget::BranchTip {
+                name: worktree_tip_target(repo, name.as_ref(), side, &unresolved_target)?,
+            },
         }
     } else {
         match unresolved_target
@@ -1073,7 +1074,7 @@ pub fn run(
     // Restacking can implicitly check out a new tip too, without creating a reference.
     let moves_branch = matches!(move_op, MoveOperation::StackBranch(_));
     let sbm = (creates_independent_branch || creates_stacked_branch || moves_branch || switch)
-        .then(|| SingleBranchMode::new(ctx, perm.read_permission(), switch))
+        .then(|| SingleBranchMode::new(ctx, perm, switch))
         .transpose()?;
     let snapshot_details = match &move_op {
         MoveOperation::CommitsRelativeTo(_) | MoveOperation::CommitsToNewBranch(_) => {

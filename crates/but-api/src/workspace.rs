@@ -11,7 +11,7 @@ use bstr::{BString, ByteSlice};
 use but_api_macros::but_api;
 use but_core::{
     DryRun, RefMetadata, extract_remote_name_and_short_name, is_workspace_ref_name,
-    sync::{RepoExclusive, RepoShared},
+    sync::RepoExclusive,
 };
 use but_error::AnyhowContextExt as _;
 use but_forge::ForgeReview;
@@ -115,7 +115,7 @@ pub fn workspace_recreate_with_perm(
         Vec::new()
     } else {
         let mut meta = ctx.meta()?;
-        let (repo, mut ws, db) = ctx.workspace_mut_and_db_with_perm(perm)?;
+        let (repo, mut ws, db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
 
         let mut skipped_missing_heads = false;
         let previously_applied_stack_heads: Vec<gix::refs::FullName> = {
@@ -225,8 +225,14 @@ pub fn workspace_recreate_with_perm(
     }
     let mut meta = ctx.meta()?;
     let (repo, ws, mut db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
-    let workspace =
-        WorkspaceState::from_workspace_with_db(&ws, &mut meta, &repo, Default::default(), &mut db)?;
+    let workspace = WorkspaceState::from_workspace_with_db(
+        &ws,
+        &mut meta,
+        &repo,
+        Default::default(),
+        Vec::new(),
+        &mut db,
+    )?;
     Ok(WorkspaceRecreateResult {
         workspace,
         conflicting_stacks,
@@ -464,11 +470,11 @@ pub fn workspace_fetch_status(ctx: &but_ctx::Context) -> anyhow::Result<Workspac
 #[but_api(napi)]
 #[instrument(skip_all, err(Debug))]
 pub fn get_workspace(
-    ctx: &but_ctx::Context,
-    perm: &RepoShared,
+    ctx: &mut but_ctx::Context,
+    perm: &mut RepoExclusive,
 ) -> anyhow::Result<but_workspace::ui::workspace::DetailedGraphWorkspace> {
     let mut meta = ctx.meta()?;
-    let (repo, workspace, mut db) = ctx.workspace_and_db_mut_with_perm(perm)?;
+    let (repo, workspace, mut db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
     let mut workspace = workspace.clone();
     but_workspace::workspace::detailed_graph_workspace(&mut workspace, &mut meta, &repo, &mut db)
         .map(Into::into)
@@ -671,13 +677,14 @@ pub mod json {
     }
 }
 
-/// Build one rebase update for the bottom of every visible workspace stack.
-pub fn rebase_stack_bottoms(head_info: &but_workspace::RefInfo) -> Vec<BottomUpdate> {
-    head_info
-        .stacks
-        .iter()
-        .filter_map(|stack| {
-            let segment = stack.segments.last()?;
+/// Build one rebase update for the bottom of each of `lanes`, which must rest on the target.
+pub fn rebase_lane_bottoms<'a>(
+    lanes: impl IntoIterator<Item = but_workspace::ref_info::Lane<'a>>,
+) -> Vec<BottomUpdate> {
+    lanes
+        .into_iter()
+        .filter_map(|lane| {
+            let segment = lane.segments.last()?;
             let selector = match segment.commits.last() {
                 Some(commit) => RelativeTo::Commit(commit.id),
                 None => RelativeTo::Reference(segment.ref_info.as_ref()?.ref_name.clone()),
@@ -922,9 +929,7 @@ pub fn workspace_integrate_upstream_only_with_perm(
         let worktree_conflicts = but_workspace::worktree_conflicts_for_rebase(&rebase)?;
 
         if dry_run.into() {
-            let replaced_commits = rebase.history.commit_mappings();
-            let workspace_state =
-                WorkspaceState::from_rebase_preview(&mut rebase, replaced_commits)?;
+            let workspace_state = WorkspaceState::from_rebase_preview(&mut rebase)?;
             // The preview was projected against the new target; the cached workspace,
             // which the next caller of this context reuses, has not moved.
             rebase.project_meta_mut().target_commit_id = cached_target;
@@ -1253,7 +1258,10 @@ mod tests {
             .peel_to_id()?
             .detach();
         let current_head = repo.head_id()?.detach();
-        let expected_merge_base = repo.merge_base(current_head, target_tip)?.detach();
+        let expected_merge_base = repo
+            .merge_base(current_head, target_tip)?
+            .expect("the feature branch shares history with main")
+            .detach();
         assert_ne!(expected_merge_base, target_tip);
 
         let mut ctx = but_ctx::Context::from_repo_for_testing(repo)?.with_memory_app_cache();
