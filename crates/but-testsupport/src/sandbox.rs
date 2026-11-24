@@ -24,7 +24,6 @@ pub struct Sandbox {
     /// The more optional this is, the more testable the application.
     #[cfg(feature = "sandbox-but-api")]
     app_root: Option<tempfile::TempDir>,
-    /// The settings that are used for the application, if they are set.
     #[cfg(feature = "sandbox-but-api")]
     app_settings: Option<AppSettings>,
 }
@@ -48,7 +47,6 @@ enum InitMetadata {
     Disallow,
 }
 
-/// Lifecycle
 impl Sandbox {
     /// Create a new instance with empty everything, except for basic application settings that prevent the app to break out.
     ///
@@ -143,7 +141,12 @@ impl Sandbox {
             let storage_path = repo.gitbutler_storage_path().unwrap();
             sandbox.file(storage_path.join("virtual_branches.toml"), "[branches]\n");
             ProjectMeta {
-                target_ref: Some("refs/remotes/origin/main".try_into().unwrap()),
+                target_ref: Some(
+                    but_core::ref_metadata::LocalRefName::new(
+                        "refs/heads/main".try_into().unwrap(),
+                    )
+                    .unwrap(),
+                ),
                 target_commit_id: Some(commit_id.detach()),
                 push_remote: Some("origin".into()),
             }
@@ -157,7 +160,6 @@ impl Sandbox {
     }
 }
 
-/// Utilities
 impl Sandbox {
     /// Create an assert with custom redactions. Adapt as needed.
     pub fn assert_with_oplog_redactions(&self) -> Assert {
@@ -226,7 +228,6 @@ impl Sandbox {
         gix::open_opts(self.projects_root(), gix::open::Options::isolated()).unwrap()
     }
 
-    /// Create a metadata instance on the project.
     pub fn meta(&self) -> impl but_core::RefMetadata {
         VirtualBranchesTomlMetadata::from_path(
             self.open_repo()
@@ -237,7 +238,6 @@ impl Sandbox {
         .unwrap()
     }
 
-    /// Read project-scoped metadata.
     pub fn project_meta(&self) -> ProjectMeta {
         ProjectMeta::resolve(&self.open_repo()).unwrap()
     }
@@ -254,7 +254,8 @@ impl Sandbox {
             .unwrap()
     }
 
-    /// Return the graph at `HEAD`, along with the `(graph, repo, meta)` repository and metadata used to create it.
+    /// Return the graph of the workspace seen from `HEAD`, along with the `(graph, repo, meta)`
+    /// repository and metadata used to create it.
     pub fn graph_at_head(
         &self,
     ) -> (
@@ -264,14 +265,27 @@ impl Sandbox {
     ) {
         let repo = self.open_repo();
         let meta = self.meta();
-        let graph = but_graph::Graph::from_head(
+        let (head_ref, head_id) = {
+            let head = repo.head().expect("sandbox HEAD can be read");
+            (
+                head.referent_name().map(ToOwned::to_owned),
+                head.id().map(|id| id.detach()),
+            )
+        };
+        let graph = but_graph::nosegment::workspace(
             &repo,
             &meta,
+            but_graph::init::Overlay::default(),
             self.project_meta(),
-            &mut crate::project_db(&repo).expect("sandbox project database always opens"),
-            but_graph::init::Options::default(),
+            head_ref.as_ref().map(|name| name.as_ref()),
+            head_id,
+            [],
+            Vec::new(),
+            false,
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .graph;
         (graph, repo, meta)
     }
 
@@ -293,13 +307,11 @@ impl Sandbox {
         visualize_commit_graph_all_from_dir(self.projects_root()).unwrap()
     }
 
-    /// Show the `git status` as string.
     pub fn git_status(&self) -> String {
         let repo = self.open_repo();
         git_status(&repo).unwrap()
     }
 
-    /// Return app settings if these were initialized.
     #[cfg(feature = "sandbox-but-api")]
     pub fn try_app_settings(&self) -> Option<&AppSettings> {
         self.app_settings.as_ref()
@@ -392,14 +404,12 @@ impl Sandbox {
         self.project_root.as_ref().unwrap().path()
     }
 
-    /// A place for the application to store
     #[cfg(feature = "sandbox-but-api")]
     pub fn app_data_dir(&self) -> &Path {
         self.app_root.as_ref().unwrap().path()
     }
 }
 
-/// Invocations
 impl Sandbox {
     /// Invoke an isolated `git` with the given `args`, which will be split automatically.
     /// Return its trimmed `stdout` for consumption.
@@ -416,8 +426,9 @@ impl Sandbox {
             .expect("git should execute");
         assert!(
             output.status.success(),
-            "git {args} failed with {status:?}",
-            status = output.status
+            "git {args} failed with {status:?}: {stderr}",
+            status = output.status,
+            stderr = String::from_utf8(output.stderr).unwrap(),
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
@@ -440,7 +451,6 @@ impl Sandbox {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// Invoke the given `script` in `bash` in this sandbox
     pub fn invoke_bash(&self, script: impl AsRef<str>) -> &Self {
         invoke_bash_at_dir(script.as_ref(), self.projects_root());
         self
@@ -467,9 +477,6 @@ impl Sandbox {
         out
     }
 
-    /// Set target sha to a given refspec
-    ///
-    /// Returns the target sha we ended up setting.
     pub fn set_target_sha(&self, spec: &str) -> gix::ObjectId {
         let repo = self.open_repo();
         let target_sha = repo.rev_parse_single(spec).unwrap();
@@ -487,8 +494,8 @@ impl Sandbox {
         use but_settings::{
             AppSettings,
             app_settings::{
-                Claude, ExtraCsp, FeatureFlags, Fetch, GitHubOAuthAppSettings, Reviews,
-                TelemetrySettings, UiSettings,
+                ExtraCsp, FeatureFlags, Fetch, GitHubOAuthAppSettings, Reviews, TelemetrySettings,
+                UiSettings,
             },
         };
         let settings = AppSettings {
@@ -505,11 +512,12 @@ impl Sandbox {
                 oauth_client_id: "but journey tests won't use github".to_string(),
             },
             feature_flags: FeatureFlags {
-                single_branch: true,
                 watch_mode: "auto".into(),
                 write_commit_evolution: true,
                 tui_file_browser: false,
-                worktree_manipulation: false,
+                gpui: false,
+                gpui_single_file_diff: false,
+                gpui_briefs: false,
             },
             extra_csp: ExtraCsp {
                 hosts: vec![],
@@ -517,14 +525,6 @@ impl Sandbox {
             },
             fetch: Fetch {
                 auto_fetch_interval_minutes: 0,
-            },
-            claude: Claude {
-                executable: "".to_string(),
-                notify_on_completion: false,
-                notify_on_permission_request: false,
-                dangerously_allow_all_permissions: false,
-                auto_commit_after_completion: false,
-                use_configured_model: false,
             },
             reviews: Reviews {
                 auto_fill_pr_description_from_commit: false,

@@ -108,23 +108,24 @@ fn deleted_branch_name_can_be_reused_without_restoring_old_branch() {
 
     tui.input('b');
     tui.input('n')
-        .assert_current_line_eq(str!["┊╭┄ br [c-branch-1] (no commits)"]);
+        .assert_current_line_eq(str!["┊╭┄ br [c-branch-1] [HEAD] (no commits)"]);
 
     tui.input(KeyCode::Enter)
-        .assert_current_line_eq(str!["┊╭┄ br [c-branch-1 ] (no commits)"]);
+        .assert_current_line_eq(str!["┊╭┄ br [c-branch-1 ] [HEAD] (no commits)"]);
 
     for _ in 0..10 {
         tui.input(KeyCode::Backspace);
     }
 
     tui.input("A")
-        .assert_current_line_eq(str!["┊╭┄ br [A ] (no commits)"]);
+        .assert_current_line_eq(str!["┊╭┄ br [A ] [HEAD] (no commits)"]);
 
     tui.input(KeyCode::Enter)
-        .assert_current_line_eq(str!["┊╭┄ g0 [A] (no commits)"]);
+        .assert_current_line_eq(str!["┊╭┄ g0 [A] [HEAD] (no commits)"]);
 
     let mut tui = tui.recreate();
-    tui.reload().assert_rendered_contains("[A] (no commits)");
+    tui.reload()
+        .assert_rendered_contains("[A] [HEAD] (no commits)");
 }
 
 #[test]
@@ -475,10 +476,10 @@ fn create_and_switch_to_stacked_branch() {
     snapbox::assert_data_eq!(
         tui.env().git_log(),
         snapbox::str![[r#"
-*   c128bce (gitbutler/workspace) GitButler Workspace Commit
+*   1003164 (gitbutler/workspace) GitButler Workspace Commit
 |/  
-| * 9477ae7 (HEAD -> c-branch-1, A) add A
-* | d3e2ba3 (B) add B
+| * d3e2ba3 (B) add B
+* | 9477ae7 (HEAD -> c-branch-1, A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 

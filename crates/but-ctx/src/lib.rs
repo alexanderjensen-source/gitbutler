@@ -1,10 +1,7 @@
-//! A crate to host a `Context` type, suitable to provide the context *applications* need to operate on a Git repository.
-#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use std::{
-    cell,
-    cell::RefCell,
+    cell::{self, RefCell},
     path::{Path, PathBuf},
 };
 
@@ -20,18 +17,15 @@ use but_utils::OnDemandCache;
 use gix::config::tree::Key as _;
 use tracing::instrument;
 
-/// Legacy types that shouldn't be used.
 #[cfg(feature = "legacy")]
 pub mod legacy;
 #[cfg(feature = "legacy")]
 pub use legacy::types::{LegacyProject, LegacyProjectId};
 
-/// Utilities to control access to the project directory of the context.
 pub mod access;
 
 pub mod worktrees;
 
-/// Conversions from project identifier values into context types.
 mod project_handle;
 /// Project identifier types live in a temporary transition crate while legacy
 /// project storage still exists.
@@ -39,15 +33,16 @@ mod project_handle;
 /// Once `gitbutler-project` is dissolved, these types are expected to merge back into `but-ctx`.
 /// Thus, use it through this crate only to simplify dependencies.
 pub use but_project_handle::{ProjectHandle, ProjectHandleOrLegacyProjectId};
-/// Convenience export as most crates out there refer to `but-ctx`.
 pub use but_utils::OnDemand;
 
-/// A context specific to a repository, along with commonly used information to make higher-level functions
-/// more convenient to implement.
-/// This type is *not* thread-safe, and cheap to clone. That way it may own per-thread caches.
-///
-/// It's fine for it to one day receive thread-safe shared state, as needed, similar to [`gix::Repository`].
-///
+#[derive(Default)]
+enum WorkspaceCache {
+    #[default]
+    Uninitialized,
+    Initialized(Box<but_graph::Workspace>),
+    Consumed,
+}
+
 /// ### Keep it read-only if you can
 ///
 /// Whenever something is mutable, either the database or the workspace, the `Context` used for interaction
@@ -82,80 +77,37 @@ pub use but_utils::OnDemand;
 /// Because we trust that you keep the invariant alive that everything in the Context is tied to `gitdir`, for that
 /// extra-bit of convenience.
 pub struct Context {
-    /// The application context, here for convenience and as feature toggles and flags are needed.
     pub settings: AppSettings,
-    /// The repository `.git` directory, and always the best paths to identify an actual repository
-    /// (or repository associated with a submodule or worktree).
-    /// It's also used for various derived directories to store GitButler data in.
     pub gitdir: PathBuf,
-    /// The directory where per-project GitButler data is stored.
-    ///
-    /// Derived from [`gix::Repository::config_snapshot`] using a channel-specific
-    /// Git config key (`gitbutler.storagePath` for release builds and
-    /// `gitbutler.<channel>.storagePath` otherwise). Relative values are resolved
-    /// against `gitdir`; paths that stay inside `gitdir` must live under a
-    /// top-level directory whose name starts with `gitbutler`. Any resolved
-    /// path outside `gitdir` gets a `<configured-path>/<project-handle>`
-    /// suffix. If that key is not configured, the default is `gitdir/gitbutler`
-    /// on all channels.
     pub project_data_dir: PathBuf,
-    /// The directory to store application caches in.
     pub app_cache_dir: Option<PathBuf>,
     cache_mode: CacheMode,
-    /// How repositories opened through this context should source their configuration.
     pub repo_open_mode: RepoOpenMode,
-    /// The most recently opened repository of the project, which also provides access to the `git_dir`.
-    ///
-    /// # Tree-Diff optimization present
-    ///
-    /// Note that the standard repository comes with a decently sized object cache, but further optimization can
-    /// be performed by using [`Self::clone_repo_for_merging()`].
     pub repo: OnDemand<gix::Repository>,
-    /// A lazily opened legacy `git2` repository for the project.
-    ///
-    /// Keep new uses confined to the residual `git2` boundary:
-    /// checkout/worktree materialization, staged tree/index materialization,
-    /// and deliberate compatibility adapters that still require libgit2.
-    /// Activation and read-side flows should use [`Self::repo`] instead.
     #[deprecated(
         note = "Boundary-only escape hatch: use Context::repo unless you are crossing the remaining libgit2 checkout/index, hook, or transport/auth adapter boundary."
     )]
     pub git2_repo: OnDemand<git2::Repository>,
-    /// An open handle to the database. It's initialized lazily upon first access.
-    /// It is also what makes this type non-Clone, which is fair.
     /// Note that the underlying ref-cell will still yield an error if the `db` is mutably borrowed more than once,
     /// which now is a real risk as the Rust borrow-check doesn't apply anymore to the parent context
     /// (which now may be read-only).
     pub db: OnDemandCache<but_db::DbHandle>,
-    /// An open handle to the cache, initialized lazily on first access and only fallible if it's already borrowed.
     pub app_cache: OnDemandCache<but_db::AppCacheHandle>,
-    /// The legacy implementation, for all the old code.
     #[cfg(feature = "legacy")]
     pub legacy_project: LegacyProject,
 
-    /// A workspace based on any version of `repo`. It's expected to be kept up-to-date
-    /// by anyone who changes it.
-    /// It also can't be public as it needs several of our cached inputs first.
-    workspace: RefCell<Option<but_graph::Workspace>>,
+    workspace: RefCell<WorkspaceCache>,
 }
 
-/// A structure that can be passed across thread boundaries.
 #[derive(Clone)]
 pub struct ThreadSafeContext {
-    /// The application context, here for convenience and as feature toggles and flags are needed.
     pub settings: AppSettings,
-    /// The directory at which the repository itself is located.
     pub gitdir: PathBuf,
-    /// The directory where per-project GitButler data is stored.
     pub project_data_dir: PathBuf,
-    /// The directory to store application caches in.
     pub app_cache_dir: Option<PathBuf>,
     cache_mode: CacheMode,
-    /// How repositories opened through this context should source their configuration.
     pub repo_open_mode: RepoOpenMode,
-    /// The most recently opened repository of the project, which also provides access to the `git_dir`.
     pub repo: Option<gix::ThreadSafeRepository>,
-    /// The legacy implementation, for all the old code.
     #[cfg(feature = "legacy")]
     pub legacy_project: LegacyProject,
 }
@@ -232,7 +184,6 @@ impl std::fmt::Debug for ThreadSafeContext {
     }
 }
 
-/// Control how `gix` repositories opened through a [`Context`] source configuration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RepoOpenMode {
     /// Use Git's normal config discovery, including user and environment-provided config.
@@ -249,11 +200,7 @@ enum CacheMode {
     Memory,
 }
 
-/// Lifecycle
 impl Context {
-    /// Create a new instance from just the `gitdir` of the repository we should provide context for.
-    /// `app_config_dir` is where the application wide configuration lives.
-    /// `app_cache_dir` is where application wide caches live. It's optional as caches are optional.
     pub fn new(
         gitdir: impl Into<PathBuf>,
         app_config_dir: impl AsRef<Path>,
@@ -267,8 +214,6 @@ impl Context {
         )
     }
 
-    /// Just like [`Context::new()`], but allows controlling how the repository
-    /// sources configuration via `repo_open_mode`.
     #[expect(
         deprecated,
         reason = "Context owns the deprecated boundary cache and must initialize it."
@@ -317,8 +262,8 @@ impl Context {
                 repo_open_mode,
                 legacy_project,
                 repo: new_ondemand_repo(gitdir.clone(), repo_open_mode),
-                git2_repo: new_ondemand_git2_repo(gitdir.clone()),
-                db: new_ondemand_db(project_data_dir.clone()),
+                git2_repo: new_ondemand_git2_repo(gitdir),
+                db: new_ondemand_db(project_data_dir),
                 app_cache: new_ondemand_app_cache(app_cache_dir.clone(), cache_mode),
                 app_cache_dir,
                 workspace: Default::default(),
@@ -327,13 +272,11 @@ impl Context {
         }
     }
 
-    /// Discover the Git repository in `directory`, or search upwards until one is found, and return it as context.
     pub fn discover(directory: impl AsRef<Path>) -> anyhow::Result<Context> {
         Self::discover_with_repo_open_mode(directory, RepoOpenMode::Standard)
     }
 
-    /// Discover the Git repository in `directory`, or search upwards until one is found, and return it as context,
-    /// resolving project-local GitButler storage using `channel` instead of the build's compile-time channel.
+    /// Resolves project-local GitButler storage using `channel` instead of the build's compile-time channel.
     pub fn discover_with_app_channel(
         directory: impl AsRef<Path>,
         channel: AppChannel,
@@ -345,8 +288,6 @@ impl Context {
         )
     }
 
-    /// Discover the Git repository in `directory`, or search upwards until one is found, and return it as context
-    /// while controlling how the repository sources configuration via `repo_open_mode`.
     pub fn discover_with_repo_open_mode(
         directory: impl AsRef<Path>,
         repo_open_mode: RepoOpenMode,
@@ -357,8 +298,6 @@ impl Context {
         Self::from_repo_with_legacy_support(repo, repo_open_mode)
     }
 
-    /// Like [`Self::discover_with_app_channel()`], but allows controlling how the repository
-    /// sources configuration via `repo_open_mode`.
     pub fn discover_with_app_channel_and_repo_open_mode(
         directory: impl AsRef<Path>,
         channel: AppChannel,
@@ -370,13 +309,10 @@ impl Context {
         Self::from_repo_with_legacy_support_and_channel(repo, repo_open_mode, channel)
     }
 
-    /// Create a context from a `project_handle`, which directly encodes the repository path.
     pub fn new_from_project_handle(project_handle: ProjectHandle) -> anyhow::Result<Self> {
         Self::new_from_project_handle_with_repo_open_mode(project_handle, RepoOpenMode::Standard)
     }
 
-    /// Create a context from a `project_handle`, which directly encodes the repository path,
-    /// while controlling how the repository sources configuration via `repo_open_mode`.
     pub fn new_from_project_handle_with_repo_open_mode(
         project_handle: ProjectHandle,
         repo_open_mode: RepoOpenMode,
@@ -386,13 +322,10 @@ impl Context {
         Self::from_repo_with_legacy_support(repo, repo_open_mode)
     }
 
-    /// Open the Git repository in `directory` and return it as context.
     pub fn open(directory: impl AsRef<Path>) -> anyhow::Result<Context> {
         Self::open_with_repo_open_mode(directory, RepoOpenMode::Standard)
     }
 
-    /// Open the Git repository in `directory` and return it as context while controlling how
-    /// the repository sources configuration via `repo_open_mode`.
     pub fn open_with_repo_open_mode(
         directory: impl AsRef<Path>,
         repo_open_mode: RepoOpenMode,
@@ -439,8 +372,8 @@ impl Context {
                 repo_open_mode,
                 legacy_project,
                 repo: new_ondemand_repo(gitdir.clone(), repo_open_mode),
-                git2_repo: new_ondemand_git2_repo(gitdir.clone()),
-                db: new_ondemand_db(project_data_dir.clone()),
+                git2_repo: new_ondemand_git2_repo(gitdir),
+                db: new_ondemand_db(project_data_dir),
                 app_cache: new_ondemand_app_cache(app_cache_dir.clone(), cache_mode),
                 app_cache_dir,
                 workspace: Default::default(),
@@ -469,8 +402,7 @@ impl Context {
         }
     }
 
-    /// Create a context that already has `repo` initialised and ready to be returned,
-    /// using [compiled-in default settings](AppSettings::default()) so tests stay hermetic -
+    /// Uses [compiled-in default settings](AppSettings::default()) so tests stay hermetic -
     /// user-level settings are neither read nor created.
     ///
     /// **Note that it does not have support for legacy projects to encourage single-branch compatible code.**
@@ -478,9 +410,6 @@ impl Context {
         Self::from_repo_with_settings(repo, AppSettings::default())
     }
 
-    /// Create a context that already has `repo` initialised and ready to be returned,
-    /// with the given `settings`.
-    ///
     /// **Note that it does not have support for legacy projects to encourage single-branch compatible code.**
     #[expect(
         deprecated,
@@ -510,8 +439,8 @@ impl Context {
             cache_mode,
             repo_open_mode,
             repo: new_ondemand_repo(gitdir.clone(), repo_open_mode),
-            git2_repo: new_ondemand_git2_repo(gitdir.clone()),
-            db: new_ondemand_db(project_data_dir.clone()),
+            git2_repo: new_ondemand_git2_repo(gitdir),
+            db: new_ondemand_db(project_data_dir),
             app_cache: new_ondemand_app_cache(app_cache_dir.clone(), cache_mode),
             app_cache_dir,
             workspace: Default::default(),
@@ -519,23 +448,16 @@ impl Context {
         .with_repo(repo)
     }
 
-    /// Use `repo` instead of the default repository that would be opened on first query.
-    pub fn with_repo(mut self, repo: gix::Repository) -> anyhow::Result<Self> {
-        if !ProjectMeta::is_ported_repo(&repo)? {
-            ProjectMeta::port_if_needed(&repo, || {
-                Ok(but_meta::legacy_storage::read_legacy_project_meta(
-                    &self.project_data_dir.join("virtual_branches.toml"),
-                )?
-                .unwrap_or_default())
-            })?;
+    pub fn with_repo(mut self, mut repo: gix::Repository) -> anyhow::Result<Self> {
+        let changed = ProjectMeta::port_if_needed(&repo)?;
+        if changed {
+            repo.reload()?;
         }
         self.repo.assign(repo);
         Ok(self)
     }
 
-    /// Use an in-memory application cache instead of cache files on disk.
-    ///
-    /// This is useful for read-only contexts so cache access doesn't create SQLite files on disk.
+    /// Useful for read-only contexts so cache access doesn't create SQLite files on disk.
     /// Prefer calling it before the first cache access.
     pub fn with_memory_app_cache(mut self) -> Self {
         self.cache_mode = CacheMode::Memory;
@@ -544,24 +466,36 @@ impl Context {
     }
 }
 
-/// Trampolines that create new uncached instances of major types.
 impl Context {
-    /// Create a cached workspace as seen from the current HEAD for editing, and return it,
-    /// along with `(guard, &mut repo, &mut ws, &mut db)`.
-    /// The guard ensures exclusive process-wide access to the repository.
-    /// Once the repository is changed, the cached workspace should be updated.
-    ///
+    fn try_ensure_initialized(&self) -> anyhow::Result<()> {
+        let must_initialize = match *self.workspace.try_borrow()? {
+            WorkspaceCache::Uninitialized => true,
+            WorkspaceCache::Initialized(_) => false,
+            WorkspaceCache::Consumed => {
+                // TODO: Think about what we should do here. Making this case fatal has been useful
+                // to flush out a lot of code cleanups, but we probably can't do it in production
+                // (at least, we need to allow two API calls in succession using the same ctx, as
+                // some of but-api's tests are doing).
+                true
+            }
+        };
+        if must_initialize {
+            self.workspace.replace(WorkspaceCache::Initialized(Box::new(
+                self.workspace_from_head()?,
+            )));
+        }
+        Ok(())
+    }
+
     /// # IMPORTANT
-    /// * if the workspace was changed, write the new workspace back into `&mut ws`.
     /// * Keep the guard alive like `let (_guard, …) = …`!
     #[instrument(name = "Context::workspace_mut_and_db_mut", level = "debug", skip_all)]
-    #[expect(clippy::type_complexity)]
     pub fn workspace_mut_and_db_mut(
         &mut self,
     ) -> anyhow::Result<(
         RepoExclusiveGuard,
         cell::RefMut<'_, gix::Repository>,
-        cell::RefMut<'_, but_graph::Workspace>,
+        but_graph::Workspace,
         cell::RefMut<'_, but_db::DbHandle>,
     )> {
         let mut guard = self.exclusive_worktree_access();
@@ -569,13 +503,6 @@ impl Context {
         Ok((guard, repo, ws, db))
     }
 
-    /// Create a cached workspace as seen from the current HEAD for editing, and return it,
-    /// along with `(&mut repo, &mut ws, &mut db)`.
-    /// `perm` ensures exclusive process-wide access to the repository.
-    /// Once the repository is changed, the cached workspace should be updated.
-    ///
-    /// # IMPORTANT
-    /// * if the workspace was changed, write it back into `&mut ws`.
     #[instrument(
         name = "Context::workspace_mut_and_db_mut_with_perm",
         level = "debug",
@@ -586,29 +513,58 @@ impl Context {
         _perm: &mut RepoExclusive,
     ) -> anyhow::Result<(
         cell::RefMut<'_, gix::Repository>,
-        cell::RefMut<'_, but_graph::Workspace>,
+        but_graph::Workspace,
         cell::RefMut<'_, but_db::DbHandle>,
     )> {
-        if let Ok(cached) =
-            cell::RefMut::filter_map(self.workspace.try_borrow_mut()?, |opt| opt.as_mut())
-        {
-            return Ok((self.repo.get_mut()?, cached, self.db.get_cache_mut()?));
-        }
-        let ws = self.workspace_from_head()?;
-        {
-            let mut value = self.workspace.try_borrow_mut()?;
-            *value = Some(ws);
-        }
-        let ws = cell::RefMut::filter_map(self.workspace.borrow_mut(), |opt| opt.as_mut())
-            .unwrap_or_else(|_| unreachable!("just set the value"));
-        Ok((self.repo.get_mut()?, ws, self.db.get_cache_mut()?))
+        self.try_ensure_initialized()?;
+        let WorkspaceCache::Initialized(ws) =
+            RefCell::replace(&self.workspace, WorkspaceCache::Consumed)
+        else {
+            unreachable!("just set the value");
+        };
+        Ok((self.repo.get_mut()?, *ws, self.db.get_cache_mut()?))
     }
 
-    /// Create a new cached workspace as seen from the current HEAD for *reading* and return it,
-    /// along with `(guard, &repo, &ws, &db)`.
-    /// The `db` is read-only.
-    /// The guard is for shared access to the repository.
-    ///
+    /// The `db` is writable as this is more useful and naturally synced.
+    /// # IMPORTANT
+    /// * Keep the guard alive like `let (_guard, …) = …`!
+    #[instrument(name = "Context::workspace_and_db_mut", level = "debug", skip_all)]
+    #[expect(clippy::type_complexity)]
+    pub fn workspace_and_db_mut(
+        &self,
+    ) -> anyhow::Result<(
+        RepoSharedGuard,
+        cell::Ref<'_, gix::Repository>,
+        cell::Ref<'_, but_graph::Workspace>,
+        cell::RefMut<'_, but_db::DbHandle>,
+    )> {
+        let guard = self.shared_worktree_access();
+        let (repo, ws, db) = self.workspace_and_db_mut_with_perm(guard.read_permission())?;
+        Ok((guard, repo, ws, db))
+    }
+
+    #[instrument(
+        name = "Context::workspace_and_db_mut_with_perm",
+        level = "debug",
+        skip_all
+    )]
+    pub fn workspace_and_db_mut_with_perm(
+        &self,
+        _perm: &RepoShared,
+    ) -> anyhow::Result<(
+        cell::Ref<'_, gix::Repository>,
+        cell::Ref<'_, but_graph::Workspace>,
+        cell::RefMut<'_, but_db::DbHandle>,
+    )> {
+        self.try_ensure_initialized()?;
+        let ws = cell::Ref::filter_map(self.workspace.try_borrow()?, |cache| match cache {
+            WorkspaceCache::Initialized(workspace) => Some(workspace.as_ref()),
+            _ => None,
+        })
+        .unwrap_or_else(|_| unreachable!("just set the value"));
+        Ok((self.repo.get()?, ws, self.db.get_cache_mut()?))
+    }
+
     /// # IMPORTANT
     /// * Keep the guard alive like `let (_guard, …) = …`!
     #[instrument(name = "Context::workspace_from_head", level = "debug", skip_all)]
@@ -626,9 +582,6 @@ impl Context {
         Ok((guard, repo, ws, db))
     }
 
-    /// Create a new cached workspace as seen from the current HEAD for *reading* and return it,
-    /// along with `(&repo, &ws, &db)`, given a read-`perm`ission.
-    /// The `db` is read-only.
     #[instrument(
         name = "Context::workspace_and_db_with_perm",
         level = "debug",
@@ -642,17 +595,12 @@ impl Context {
         cell::Ref<'_, but_graph::Workspace>,
         cell::Ref<'_, but_db::DbHandle>,
     )> {
-        if let Ok(cached) = cell::Ref::filter_map(self.workspace.try_borrow()?, |opt| opt.as_ref())
-        {
-            return Ok((self.repo.get()?, cached, self.db.get_cache()?));
-        }
-        let ws = self.workspace_from_head()?;
-        {
-            let mut value = self.workspace.try_borrow_mut()?;
-            *value = Some(ws);
-        }
-        let ws = cell::Ref::filter_map(self.workspace.borrow(), |opt| opt.as_ref())
-            .unwrap_or_else(|_| unreachable!("just set the value"));
+        self.try_ensure_initialized()?;
+        let ws = cell::Ref::filter_map(self.workspace.try_borrow()?, |cache| match cache {
+            WorkspaceCache::Initialized(workspace) => Some(workspace.as_ref()),
+            _ => None,
+        })
+        .unwrap_or_else(|_| unreachable!("just set the value"));
         Ok((self.repo.get()?, ws, self.db.get_cache()?))
     }
 
@@ -665,20 +613,31 @@ impl Context {
             self.project_data_dir(),
         )?;
         let mut db = self.db.get_cache_mut()?;
-        let graph = but_graph::Graph::from_head(
+        let traversal = but_graph::init::Options {
+            worktrees: true,
+            ..but_graph::init::Options::limited()
+        };
+        let head = repo.head()?;
+        but_graph::nosegment::workspace(
             &repo,
             &meta,
+            but_graph::init::Overlay::default(),
             self.project_meta()?,
-            &mut db,
-            but_graph::init::Options {
-                worktrees: self.settings.feature_flags.worktree_manipulation,
-                ..but_graph::init::Options::limited()
-            },
-        )?;
-        graph.into_workspace()
+            head.referent_name(),
+            head.id().map(|id| id.detach()),
+            [],
+            but_graph::init::discover_worktree_tips(&repo, &mut db, traversal.worktrees)?,
+            traversal.collect_tags,
+            traversal.commits_limit_hint,
+        )
+        // Traversals redone from this workspace use the options it was made with, linked
+        // worktrees included.
+        .map(|mut ws| {
+            ws.graph.options = traversal;
+            ws
+        })
     }
 
-    /// Project the current workspace without reading from or updating the workspace cache.
     pub fn workspace_from_head_uncached(
         &self,
         _perm: &RepoShared,
@@ -707,48 +666,49 @@ impl Context {
             self.project_data_dir(),
         )?;
         let mut reference = repo.find_reference(ref_name)?;
-        let tip = reference.peel_to_id()?;
+        let tip = reference.peel_to_id()?.detach();
         let mut db = self.db.get_cache_mut()?;
-        let graph = but_graph::Graph::from_commit_traversal(
-            tip,
-            reference.name().to_owned(),
+        let traversal = but_graph::init::Options {
+            worktrees: true,
+            ..but_graph::init::Options::limited()
+        };
+        but_graph::nosegment::workspace(
+            &repo,
             &meta,
+            but_graph::init::Overlay::default(),
             self.project_meta()?,
-            &mut db,
-            but_graph::init::Options {
-                worktrees: self.settings.feature_flags.worktree_manipulation,
-                ..but_graph::init::Options::limited()
-            },
-        )?;
-        graph.into_workspace()
+            Some(reference.name()),
+            Some(tip),
+            [],
+            but_graph::init::discover_worktree_tips(&repo, &mut db, traversal.worktrees)?,
+            traversal.collect_tags,
+            traversal.commits_limit_hint,
+        )
+        // Traversals redone from this workspace use the options it was made with, linked
+        // worktrees included.
+        .map(|mut ws| {
+            ws.graph.options = traversal;
+            ws
+        })
     }
 }
 
-/// Non-project/global data access. Only for when no project is available (yet).
 impl Context {
-    /// Create an application cache handle in the configured application cache directory.
-    /// This is independent of projects.
-    ///
-    /// This is a convenience for callers that need app-cache access before a `Context`
+    /// A convenience for callers that need app-cache access before a `Context`
     /// instance is available. If you have an instance, use [`Self::app_cache`] instead.
     pub fn app_cache() -> but_db::AppCacheHandle {
         but_db::AppCacheHandle::new_in_directory(but_path::app_cache_dir().ok())
     }
 }
 
-/// Utilities
 impl Context {
-    /// Return project metadata from Git config.
-    ///
-    /// This always reads the current on-disk state, so target changes made by other processes
+    /// Always reads the current on-disk state, so target changes made by other processes
     /// or through other repository handles are observed even by long-lived instances.
     pub fn project_meta(&self) -> anyhow::Result<ProjectMeta> {
         let repo = self.repo.get()?;
         ProjectMeta::resolve(&repo)
     }
 
-    /// Store project metadata in Git config.
-    ///
     /// Note that the cached repository handle needs no reload: [`Self::project_meta()`]
     /// re-reads the on-disk configuration on every call.
     pub fn set_project_meta(&self, project_meta: ProjectMeta) -> anyhow::Result<()> {
@@ -760,9 +720,7 @@ impl Context {
         Ok(())
     }
 
-    /// Reload the cached repository handle and drop the cached workspace projection.
-    ///
-    /// Call this after taking exclusive repository access when earlier read-only setup may have
+    /// Call after taking exclusive repository access when earlier read-only setup may have
     /// cached a workspace view from an outdated `HEAD`.
     pub fn reload_repo_and_invalidate_workspace(
         &mut self,
@@ -772,20 +730,20 @@ impl Context {
         self.invalidate_workspace_cache()
     }
 
-    /// Drop the cached workspace projection so the next read re-projects from the current repository
-    /// and metadata state. *Use this when the metadata state changed*.
-    ///
-    /// Don't use this if you already know the new materialised state - instead, set the new workspace
-    /// directly into the mutable cache already present in scope.
     pub fn invalidate_workspace_cache(&self) -> anyhow::Result<()> {
-        *self.workspace.try_borrow_mut()? = None;
+        *self.workspace.try_borrow_mut()? = WorkspaceCache::Uninitialized;
         Ok(())
     }
 
-    /// Return a read/write metadata handle for the project, backed by `virtual_branches.toml` and
-    /// the branch-order database.
-    ///
-    /// This is a plain read/write accessor and intentionally does *not* prune stale
+    /// Meant for legacy operations that update the workspace,
+    /// expecting code that runs later to pick up the cache and materialize it. New code should
+    /// avoid using this method if possible.
+    pub fn update_workspace_cache(&mut self, ws: but_graph::Workspace) {
+        self.workspace
+            .replace(WorkspaceCache::Initialized(Box::new(ws)));
+    }
+
+    /// Intentionally does *not* prune stale
     /// branch-order entries: reading branch stack order is best-effort and may return refs for
     /// branches that no longer exist (consumers already validate each ref against the repository
     /// and ignore the ones that don't resolve). Pruning happens out-of-band on fetch via
@@ -802,7 +760,6 @@ impl Context {
         )
     }
 
-    /// Copy all copyable values into an instance to pass across thread boundaries.
     pub fn to_sync(&self) -> ThreadSafeContext {
         ThreadSafeContext {
             settings: self.settings.clone(),
@@ -817,7 +774,6 @@ impl Context {
         }
     }
 
-    /// Take all copyable values and place them in an instance that can pass across thread boundaries.
     #[expect(
         deprecated,
         reason = "Context owns the deprecated boundary cache and must move it out internally."
@@ -853,35 +809,26 @@ impl Context {
 }
 
 impl ThreadSafeContext {
-    /// Turn this instance back into a thread-local version, possibly keeping previously cached values.
     pub fn into_thread_local(self) -> Context {
         self.into()
     }
 }
 
-/// Paths and locations.
 impl Context {
-    /// The location where project-specific data can be stored that is owned by the application.
     pub fn project_data_dir(&self) -> PathBuf {
         self.project_data_dir.clone()
     }
 
-    /// The path to the worktree directory or the `.git` directory if there is no worktree directory.
-    /// Fallible as it may need to open a repository.
     pub fn workdir_or_gitdir(&self) -> anyhow::Result<PathBuf> {
         let repo = self.repo.get()?;
         Ok(repo.workdir().unwrap_or(repo.git_dir()).to_owned())
     }
 
-    /// Return the worktree directory associated with the context Git [repository](Self::repo).
     pub fn workdir(&self) -> anyhow::Result<Option<PathBuf>> {
         self.repo.get().map(|repo| repo.workdir().map(Into::into))
     }
 
-    /// Return the worktree directory associated with the context Git [repository](Self::repo),
-    /// or fail.
-    ///
-    /// # Try to gracefully degrade if there is no worktree!
+    /// Prefer degrading gracefully when there is no worktree.
     pub fn workdir_or_fail(&self) -> anyhow::Result<PathBuf> {
         let repo = self.repo.get()?;
         repo.workdir()
@@ -890,46 +837,30 @@ impl Context {
     }
 }
 
-/// *Repository* helpers, for when you need something more specific than [Self::repo].
+const DIRECTORY_RENAMES_OVERRIDE: &str = "merge.directoryRenames=true";
+
 impl Context {
-    /// Open an isolated repository, one that didn't read options beyond `.git/config` and
-    /// knows no environment variables.
-    ///
     /// Use it for fastest-possible access, when incomplete configuration is acceptable.
     /// Note that [Self::repo].get() should be preferred.
     pub fn open_isolated_repo(&self) -> anyhow::Result<gix::Repository> {
         Ok(gix::open_opts(
             &self.gitdir,
-            gix::open::Options::isolated(),
+            gix::open::Options::isolated().config_overrides([DIRECTORY_RENAMES_OVERRIDE]),
         )?)
     }
 
-    /// Return a cloned [`Repository`](gix::Repository) as cached in the context, with all configuration available
-    /// to correctly figure out author and committer names (i.e. with most global configuration loaded),
-    /// *and* which will perform diffs quickly thanks to an adequate object cache.
-    ///
-    /// This naturally is also useful for merging, but *only if these merged objects are supposed to be persisted immediately*.
-    /// Note that the object cache will be temporary this way, and is dropped when the instance is dropped.
+    /// For merging *only if these merged objects are supposed to be persisted immediately*.
     pub fn clone_repo_for_merging(&self) -> anyhow::Result<gix::Repository> {
         let repo = self.repo.get()?.clone().for_tree_diffing()?;
         Ok(repo)
     }
 
-    /// Return a cloned [`Repository`](gix::Repository) as cached in the context, with all configuration available
-    /// to correctly figure out author and committer names (i.e. with most global configuration loaded),
-    /// *and* which will perform diffs quickly thanks to an adequate object cache, *and*
-    /// which **writes all objects into memory**.
-    ///
-    /// This means *changes are non-persisting*.
-    /// Note that the object cache will be temporary this way, and is dropped when the instance is dropped.
     pub fn clone_repo_for_merging_non_persisting(&self) -> anyhow::Result<gix::Repository> {
         self.clone_repo_for_merging()
             .map(|repo| repo.with_object_memory())
     }
 }
 
-/// For now, always make sure we have object caches setup to make diffs fast in the common case.
-/// Optimizing this based on better heuristics can be done with [Context::clone_repo_for_merging()].
 fn new_ondemand_repo(gitdir: PathBuf, repo_open_mode: RepoOpenMode) -> OnDemand<gix::Repository> {
     OnDemand::new(move || {
         open_repo(&gitdir, repo_open_mode).map(|mut repo| {
@@ -939,10 +870,14 @@ fn new_ondemand_repo(gitdir: PathBuf, repo_open_mode: RepoOpenMode) -> OnDemand<
     })
 }
 
-/// Discover the Git repository containing `directory`, resolving a linked worktree to the repository
-/// of its main worktree so that callers see the same workspace no matter which checkout they run in.
+/// A linked worktree resolves to the repository of its main worktree so that callers see the
+/// same workspace no matter which checkout they run in.
 pub fn discover_main_repo(directory: impl AsRef<Path>) -> anyhow::Result<gix::Repository> {
-    let repo = gix::discover(directory)?;
+    let repo =
+        gix::ThreadSafeRepository::discover_opts(directory, Default::default(), |options, _| {
+            options.config_overrides([DIRECTORY_RENAMES_OVERRIDE])
+        })?
+        .to_thread_local();
     if repo.git_dir() == repo.common_dir() {
         return Ok(repo);
     }
@@ -955,6 +890,7 @@ fn open_repo(gitdir: &Path, repo_open_mode: RepoOpenMode) -> anyhow::Result<gix:
         RepoOpenMode::Isolated => gix::open::Options::isolated(),
     }
     .config_overrides([
+        DIRECTORY_RENAMES_OVERRIDE.into(),
         gix::config::tree::gitoxide::Committer::NAME_FALLBACK
             .validated_assignment("GitButler".into())?,
         gix::config::tree::gitoxide::Committer::EMAIL_FALLBACK
@@ -965,10 +901,7 @@ fn open_repo(gitdir: &Path, repo_open_mode: RepoOpenMode) -> anyhow::Result<gix:
 
 #[instrument(level = "trace")]
 fn new_ondemand_git2_repo(gitdir: PathBuf) -> OnDemand<git2::Repository> {
-    OnDemand::new({
-        let gitdir = gitdir.clone();
-        move || but_oxidize::open_git2_repo(&gitdir)
-    })
+    OnDemand::new(move || but_oxidize::open_git2_repo(&gitdir))
 }
 
 #[instrument(level = "trace")]

@@ -1,5 +1,3 @@
-//! Implementation of the `but apply` command.
-
 use anyhow::Context as _;
 use but_core::sync::RepoExclusive;
 use but_ctx::Context;
@@ -10,8 +8,11 @@ use serde::Serialize;
 use crate::{
     CliResult,
     args::apply::Platform,
-    theme::{self, Theme},
-    utils::{CliOutput, CliOutputHuman, IntermediateChannel, WriteWithUtils},
+    bad_input,
+    theme::{self, Paint as _, Theme},
+    utils::{
+        CliOutput, CliOutputHuman, IntermediateChannel, WriteWithUtils, rejection::shell_quote,
+    },
 };
 
 pub enum ApplyOutcome {
@@ -38,7 +39,7 @@ impl CliOutputHuman for ApplyOutcome {
         self,
         out: &mut dyn WriteWithUtils,
         _agent: bool,
-        _theme: &'static Theme,
+        theme: &'static Theme,
     ) -> anyhow::Result<()> {
         match self {
             ApplyOutcome::AlreadyApplied {
@@ -84,6 +85,7 @@ impl CliOutputHuman for ApplyOutcome {
             }
             ApplyOutcome::ConflictAborted(outcome) => {
                 writeln!(out, "Failed to apply branch: {outcome}")?;
+                outcome.write_next_steps(out, theme)?;
             }
         }
 
@@ -99,7 +101,6 @@ impl CliOutput for ApplyOutcome {
             status: OutcomeStatus,
             workspace_changed: bool,
             applied_branches: Vec<String>,
-            workspace_ref_created: bool,
             conflicting_stacks: Vec<String>,
         }
 
@@ -107,13 +108,14 @@ impl CliOutput for ApplyOutcome {
             fn from(value: but_workspace::branch::apply::Outcome) -> Self {
                 Self {
                     status: value.status,
-                    workspace_changed: value.workspace_changed(),
+                    // `Outcome::workspace_changed()` is also true for the unpersisted
+                    // projection of a conflict-aborted apply.
+                    workspace_changed: value.status.persisted_mutation(),
                     applied_branches: value
                         .applied_branches
                         .into_iter()
                         .map(|branch| branch.to_string())
                         .collect(),
-                    workspace_ref_created: value.workspace_ref_created,
                     conflicting_stacks: value
                         .conflicting_stacks
                         .into_iter()
@@ -136,6 +138,51 @@ impl CliOutput for ApplyOutcome {
 pub struct ConflictAbortedOutcome {
     pub requested_branch: FullName,
     pub outcome: but_workspace::branch::apply::Outcome,
+}
+
+impl ConflictAbortedOutcome {
+    /// Name the commands that apply the requested branch anyway, as the refusal changed nothing.
+    fn write_next_steps(&self, out: &mut dyn WriteWithUtils, t: &Theme) -> anyhow::Result<()> {
+        let branch = self.requested_branch.shorten().to_string();
+        let mut hints = Vec::new();
+        if !self.outcome.conflicting_stacks.is_empty() {
+            let unapply: String = self
+                .outcome
+                .conflicting_stacks
+                .iter()
+                .map(|stack| {
+                    let name = stack.ref_name.shorten().to_string();
+                    format!("but unapply {} && ", shell_quote(&name))
+                })
+                .collect();
+            hints.push((
+                format!(
+                    "to apply {}, unapply what it conflicts with first:",
+                    theme::Branch(&self.requested_branch)
+                ),
+                format!("{unapply}but apply {}", shell_quote(&branch)),
+            ));
+        }
+        // A remote branch has no worktree command: `but worktree new origin/x` creates a new
+        // local branch named `origin/x`.
+        if self.requested_branch.category() == Some(Category::LocalBranch) {
+            hints.push((
+                format!(
+                    "to leave the workspace as it is, check {} out in its own worktree:",
+                    theme::Branch(&self.requested_branch)
+                ),
+                format!("but worktree new {}", shell_quote(&branch)),
+            ));
+        }
+        if !hints.is_empty() {
+            writeln!(out)?;
+        }
+        for (explanation, command) in hints {
+            writeln!(out, "{} {explanation}", t.hint.paint("Hint:"))?;
+            writeln!(out, "  {}", t.command_suggestion.paint(command))?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for ConflictAbortedOutcome {
@@ -173,17 +220,34 @@ pub fn apply(
     let mut guard = ctx.exclusive_worktree_access();
 
     let operation = {
-        let repo = ctx.repo.get()?;
-        resolve(args, &repo).context("Failed to apply branch")?
+        let (repo, ws, _) = ctx.workspace_and_db_with_perm(guard.read_permission())?;
+        resolve(args, &repo, &ws)?
     };
 
     Ok(run(ctx, guard.write_permission(), operation).context("Failed to apply branch")?)
 }
 
-fn resolve(args: Platform, repo: &gix::Repository) -> anyhow::Result<ApplyOperation> {
+fn resolve(
+    args: Platform,
+    repo: &gix::Repository,
+    ws: &but_graph::Workspace,
+) -> CliResult<ApplyOperation> {
     let Platform { branch } = args;
 
-    let branch = branch.resolve_legacy_top_level_apply_branch_name(repo)?;
+    let branch = branch
+        .resolve_legacy_top_level_apply_branch_name(repo)
+        .context("Failed to apply branch")?;
+    let reference = repo
+        .find_reference(&*branch)
+        .context("Failed to apply branch")?;
+    if ws.is_target_or_upstream(reference.name(), repo)? {
+        return Err(bad_input(format!(
+            "Cannot apply '{}': it is the workspace target branch.",
+            reference.name().shorten()
+        ))
+        .hint("Apply a feature branch instead.")
+        .into());
+    }
 
     Ok(ApplyOperation { branch })
 }

@@ -33,7 +33,6 @@ but-db.workspace = true
 but-settings.workspace = true
 but-core.workspace = true
 but-askpass.workspace = true
-but-action.workspace = true
 but-api = { workspace = true, features = ["tauri", "path-bytes", "legacy"] }
 but-ctx = { workspace = true, features = ["legacy"] }
 notify-rust.workspace = true
@@ -77,6 +76,7 @@ url = "2.5.4"
 but-path.workspace = true
 tauri-plugin-deep-link = "2"
 document-features = { version = "0.2", optional = true }
+but-gpui = { path = "../but-gpui", optional = true }
 portable-pty = "0.9.0"
 uuid.workspace = true
 
@@ -90,11 +90,11 @@ workspace = true
 default = ["custom-protocol", "devtools", "opener"]
 #! ## Build- and package-related Options
 ## If enabled, we will pretend to be `but` when the binary filename is `but`.
-builtin-but = ["dep:but", "but-action/builtin-but"]
+builtin-but = ["dep:but", "but-api/builtin-but"]
+## Start the experimental native client instead of the web one when run with `--gpui`.
+builtin-gpui = ["dep:but-gpui"]
 ## Enable experimental CLI commands and features for nightly releases only.
 nightly = ["but?/nightly"]
-## Enable COW worktrees, including the bundled CLI.
-worktree-cow = ["but-api/worktree-cow", "but?/worktree-cow"]
 ## A very specific utility flag to make clear that the 'but' binary is managed by a package manager.
 packaged-but-distribution = ["but?/packaged-but-distribution"]
 ## Disable the auto-updater in the frontend.

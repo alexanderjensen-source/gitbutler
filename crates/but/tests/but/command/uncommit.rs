@@ -252,6 +252,99 @@ fn uncommit_command_on_commit() {
 "#]]);
 }
 
+/// The refusal is bad input that names only the commits in the way, and its hint gets the user out.
+#[test]
+fn uncommit_refuses_a_commit_that_a_later_commit_depends_on() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("zero-stacks");
+    env.setup_metadata(&[]);
+
+    // These become `mot`, `lmk` and `vyr`: `lmk` depends on `mot`, and `vyr` depends on neither.
+    env.file("file", "first\n");
+    env.but("commit -m 'add file'").assert().success();
+    env.file("file", "first\nsecond\n");
+    env.but("commit -m 'change file'").assert().success();
+    env.file("unrelated", "content\n");
+    env.but("commit -m 'add unrelated'").assert().success();
+
+    env.but("uncommit mot")
+        .assert()
+        .failure()
+        .stdout_eq(str![])
+        .stderr_eq(str![[r#"
+Error: Cannot uncommit commits that would result in merge conflicts
+
+Hint: Later commits depend on these changes. Run `but uncommit lmk` first, then retry
+
+"#]]);
+
+    env.but("uncommit lmk").assert().success();
+    env.but("uncommit mot").assert().success();
+
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted]
+┊   qs A file
+┊
+┊╭┄ br [a-branch-1] [HEAD]
+┊●   vyr add unrelated
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but diff` to see uncommitted changes and `but commit -b <branch> -m "message" <id>` to commit them
+
+"#]]);
+}
+
+/// A commit that was conflicted before the uncommit ran isn't a conflict the uncommit would cause.
+#[test]
+fn uncommit_ignores_a_commit_that_was_already_conflicted() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("zero-stacks");
+    env.setup_metadata(&[]);
+
+    // These become `mot` and `lmk` on one branch, and `tlm` on another.
+    env.but("branch new conflicted").assert().success();
+    env.file("file", "first\n");
+    env.but("commit -b conflicted -m 'add file' file")
+        .assert()
+        .success();
+    env.file("file", "first\nsecond\n");
+    env.but("commit -b conflicted -m 'change file' file")
+        .assert()
+        .success();
+    env.but("branch new other").assert().success();
+    env.file("unrelated", "content\n");
+    env.but("commit -b other -m 'add unrelated' unrelated")
+        .assert()
+        .success();
+    env.but("move mot --above lmk").assert().success();
+
+    env.but("uncommit tlm").assert().success();
+
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+╭┄ @ [uncommitted]
+┊   tt A unrelated
+┊
+┊╭┄ ot [other] (no commits)
+├╯
+┊
+┊╭┄ co [conflicted]
+┊●   mot add file
+┊●   lmk change file (no changes) {conflicted}
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but diff` to see uncommitted changes and `but commit -b <branch> -m "message" <id>` to commit them
+
+"#]]);
+}
+
 #[test]
 fn uncommit_rejects_merged_upstream_commit() {
     let env =
@@ -347,7 +440,7 @@ Uncommitted 'A', 'B', 'C'
 ┊   pl A B
 ┊   wx A C
 ┊
-┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+┴ 0dc3733 (common base, main, origin/main, HEAD) 2000-01-02 add M
 
 Hint: run `but branch new` to create a new branch to work on
 
@@ -376,6 +469,45 @@ Hint: run `but branch new` to create a new branch to work on
 ├╯
 ┊
 ┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+}
+
+#[test]
+fn uncommit_current_branch_in_single_branch_mode_is_undoable() {
+    let env = Sandbox::open_with_default_settings("single-branch-mode");
+    env.file("y.txt", "y\n");
+    env.but("commit -b y -m 'add y'").assert().success();
+
+    env.but("uncommit y").assert().success().stdout_eq(str![[r#"
+Uncommitted 'y'
+
+"#]]);
+
+    // HEAD leaves the removed branch, and its changes stay in the worktree.
+    env.but("status -f").assert().success().stdout_eq(str![[r#"
+╭┄ @ [uncommitted]
+┊   oq A y.txt
+┊
+┴ b1540e5 (common base, main, origin/main, HEAD) 2000-01-02 M
+
+Hint: run `but branch new` to create a new branch to work on
+
+"#]]);
+
+    env.but("undo").assert().success();
+
+    env.but("status -f").assert().success().stdout_eq(str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [y] [HEAD]
+┊●   xms add y
+┊│     xms:o A y.txt
+├╯
+┊
+┴ b1540e5 (common base, main, origin/main) 2000-01-02 M
 
 Hint: run `but help` for all commands
 

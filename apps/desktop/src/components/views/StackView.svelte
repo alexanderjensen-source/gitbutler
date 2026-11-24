@@ -10,11 +10,16 @@
 	import { TestId } from "@gitbutler/ui-svelte";
 	import { focusable } from "@gitbutler/ui-svelte/focus/focusable";
 	import { intersectionObserver } from "@gitbutler/ui-svelte/utils/intersectionObserver";
+	import type { Worktree } from "@gitbutler/but-sdk";
 
 	type Props = {
 		projectId: string;
 		stack: Stack;
 		laneId: string;
+		/** Show this linked worktree's files and commits; `stack` then holds its segments. */
+		worktree?: Worktree;
+		/** The stack branch holding the commit `worktree` rests on, when it rests on one. */
+		baseBranchName?: string;
 		onFoldStack?: () => void;
 		onVisible: (visible: boolean) => void;
 		clientWidth?: number;
@@ -25,6 +30,8 @@
 		projectId,
 		stack,
 		laneId,
+		worktree,
+		baseBranchName,
 		onFoldStack,
 		clientHeight = $bindable(),
 		clientWidth = $bindable(),
@@ -41,6 +48,7 @@
 		laneId: () => laneId,
 		branchNames: () =>
 			segments.flatMap((segment) => (segment.refName ? [segment.refName.displayName] : [])),
+		worktree: () => worktree,
 	});
 	setStackContext(controller);
 
@@ -52,11 +60,7 @@
 	const DETAILS_DEFAULT_WIDTH = 37;
 
 	const persistedStackWidth = $derived(
-		persistWithExpiration(
-			PANEL1_RESIZER.defaultValue,
-			`ui-stack-width-${controller.stackId}`,
-			1440,
-		),
+		persistWithExpiration(PANEL1_RESIZER.defaultValue, `ui-stack-width-${laneId}`, 1440),
 	);
 
 	let stackViewEl = $state<HTMLDivElement>();
@@ -102,7 +106,7 @@
 	data-id={controller.stackId}
 	data-testid={TestId.Stack}
 	data-testid-stackid={controller.stackId}
-	data-testid-stack={topBranchName}
+	data-testid-stack={topBranchName ?? worktree?.name}
 	use:intersectionObserver={{
 		callback: (entry) => {
 			onVisible(!!entry?.isIntersecting);
@@ -136,12 +140,12 @@
 					}}
 					bind:this={stackViewEl}
 				>
-					<StackPanel {segments} {topBranchName} {onFoldStack} />
+					<StackPanel {segments} {topBranchName} {onFoldStack} {baseBranchName} />
 
 					<!-- RESIZE PANEL 1 -->
 					{#if stackViewEl}
 						<Resizer
-							persistId="ui-stack-width-${controller.stackId}"
+							persistId="ui-stack-width-${laneId}"
 							viewport={stackViewEl}
 							zIndex="var(--z-lifted)"
 							direction="right"

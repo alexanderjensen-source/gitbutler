@@ -57,6 +57,7 @@ Graph {
     entrypoint_ref: None,
     traversal_tips: [],
     ad_hoc_branch_stack_orders: [],
+    worktree_branch_stack_orders: [],
     hard_limit_hit: false,
     options: Options {
         collect_tags: false,
@@ -65,6 +66,7 @@ Graph {
         hard_limit: None,
         dangerously_skip_postprocessing_for_debugging: false,
         worktrees: false,
+        extra_refs: [],
     },
     worktree_tips: [],
     project_meta: ProjectMeta {
@@ -72,6 +74,7 @@ Graph {
         target_commit_id: None,
         push_remote: None,
     },
+    target_upstream_ref: None,
     symbolic_remote_names: [],
 }
 
@@ -179,6 +182,7 @@ Graph {
                     Sha1(fafd9d08a839d99db60b222cd58e2e0bfaf1f7b2),
                 ),
                 parent_order: 0,
+                workspace_parent_order: None,
             },
         },
         free_node: NodeIndex(4294967295),
@@ -200,10 +204,10 @@ Graph {
             role: Reachable,
             metadata: None,
             is_entrypoint: true,
-            is_detached: false,
         },
     ],
     ad_hoc_branch_stack_orders: [],
+    worktree_branch_stack_orders: [],
     hard_limit_hit: false,
     options: Options {
         collect_tags: true,
@@ -212,6 +216,7 @@ Graph {
         hard_limit: None,
         dangerously_skip_postprocessing_for_debugging: false,
         worktrees: false,
+        extra_refs: [],
     },
     worktree_tips: [],
     project_meta: ProjectMeta {
@@ -219,6 +224,7 @@ Graph {
         target_commit_id: None,
         push_remote: None,
     },
+    target_upstream_ref: None,
     symbolic_remote_names: [],
 }
 
@@ -750,47 +756,16 @@ fn four_diamond() -> anyhow::Result<()> {
 }
 
 #[test]
-fn explicit_traversal_tips_reject_duplicate_traversal_seeds() -> anyhow::Result<()> {
-    let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let merged_id = id_by_rev(&repo, "merged").detach();
-    let a_id = id_by_rev(&repo, "A").detach();
-    let a_ref = ref_name("refs/heads/A");
-
-    let err = Graph::from_commit_traversal_tips(
-        &repo,
-        [
-            Tip::entrypoint(merged_id, None),
-            Tip::reachable(a_id, None),
-            Tip::reachable(a_id, Some(a_ref)),
-        ],
-        &*meta,
-        but_core::ref_metadata::ProjectMeta::default(),
-        &mut db,
-        standard_options(),
-    )
-    .expect_err("duplicate traversal seeds must be rejected");
-
-    assert!(
-        err.to_string()
-            .starts_with("explicit traversal tips contain duplicate traversal seed Tip"),
-        "unexpected error: {err}"
-    );
-    Ok(())
-}
-
-#[test]
-fn explicit_traversal_tips_allow_overlapping_commit_ids() -> anyhow::Result<()> {
+fn extra_tips_allow_overlapping_commit_ids() -> anyhow::Result<()> {
     let (repo, meta, mut db) = read_only_in_memory_scenario("detached")?;
-    let main_id = id_by_rev(&repo, "main").detach();
+    let main_id = id_by_rev(&repo, "main");
     let main_ref = ref_name("refs/heads/main");
     let release_tag = ref_name("refs/tags/release/v1");
 
-    let graph = Graph::from_commit_traversal_tips(
-        &repo,
-        [
-            Tip::entrypoint(main_id, Some(main_ref)),
-            Tip::reachable(main_id, Some(release_tag)),
-        ],
+    let graph = Graph::from_commit_traversal_with_extra_tips(
+        main_id,
+        Some(main_ref),
+        [Tip::reachable(main_id.detach(), Some(release_tag))],
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
         &mut db,
@@ -814,10 +789,9 @@ fn explicit_traversal_tips_allow_overlapping_commit_ids() -> anyhow::Result<()> 
 }
 
 #[test]
-fn explicit_traversal_tips_allow_named_and_anonymous_integrated_targets_on_same_commit()
--> anyhow::Result<()> {
+fn extra_tips_allow_named_and_anonymous_integrated_targets_on_same_commit() -> anyhow::Result<()> {
     let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let merged_id = id_by_rev(&repo, "merged").detach();
+    let merged_id = id_by_rev(&repo, "merged");
     let main_id = id_by_rev(&repo, "main").detach();
 
     snapbox::assert_data_eq!(
@@ -842,10 +816,10 @@ fn explicit_traversal_tips_allow_named_and_anonymous_integrated_targets_on_same_
         .raw()
     );
 
-    let graph = Graph::from_commit_traversal_tips(
-        &repo,
+    let graph = Graph::from_commit_traversal_with_extra_tips(
+        merged_id,
+        Some(ref_name("refs/heads/merged")),
         [
-            Tip::entrypoint(merged_id, Some(ref_name("refs/heads/merged"))),
             Tip::integrated(main_id, Some(ref_name("refs/heads/main"))),
             Tip::integrated(main_id, None),
         ],
@@ -881,107 +855,6 @@ fn explicit_traversal_tips_allow_named_and_anonymous_integrated_targets_on_same_
 ◎  main
 ●  🏁·965998b (⌂|✓)
 "#]]
-    );
-    Ok(())
-}
-
-#[test]
-fn explicit_traversal_tips_reject_multiple_entrypoints() -> anyhow::Result<()> {
-    let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let merged_id = id_by_rev(&repo, "merged").detach();
-    let a_id = id_by_rev(&repo, "A").detach();
-
-    let err = Graph::from_commit_traversal_tips(
-        &repo,
-        [
-            Tip::entrypoint(merged_id, None),
-            Tip::entrypoint(a_id, None),
-        ],
-        &*meta,
-        but_core::ref_metadata::ProjectMeta::default(),
-        &mut db,
-        standard_options(),
-    )
-    .expect_err("multiple entrypoints must be rejected");
-
-    assert_eq!(
-        err.to_string(),
-        "explicit traversal tips require exactly one entrypoint"
-    );
-    Ok(())
-}
-
-#[test]
-fn explicit_traversal_tips_reject_duplicate_ref_names() -> anyhow::Result<()> {
-    let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let a_id = id_by_rev(&repo, "A").detach();
-    let a_ref = ref_name("refs/heads/A");
-
-    let err = Graph::from_commit_traversal_tips(
-        &repo,
-        [
-            Tip::entrypoint(a_id, Some(a_ref.clone())),
-            Tip::reachable(a_id, Some(a_ref.clone())),
-        ],
-        &*meta,
-        but_core::ref_metadata::ProjectMeta::default(),
-        &mut db,
-        standard_options(),
-    )
-    .expect_err("duplicate ref names must be rejected");
-
-    assert_eq!(
-        err.to_string(),
-        format!("explicit traversal tips contain duplicate ref name {a_ref}")
-    );
-    Ok(())
-}
-
-#[test]
-fn explicit_traversal_tips_reject_detached_entrypoint_with_ref_name() -> anyhow::Result<()> {
-    let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let merged_id = id_by_rev(&repo, "merged").detach();
-
-    let err = Graph::from_commit_traversal_tips(
-        &repo,
-        [Tip::new(merged_id)
-            .with_ref_name(Some(ref_name("refs/heads/merged")))
-            .with_entrypoint()
-            .with_is_detached(true)],
-        &*meta,
-        but_core::ref_metadata::ProjectMeta::default(),
-        &mut db,
-        standard_options(),
-    )
-    .expect_err("detached entrypoints must not be named");
-
-    assert_eq!(
-        err.to_string(),
-        "explicit detached entrypoint tip cannot have a ref name"
-    );
-    Ok(())
-}
-
-#[test]
-fn explicit_traversal_tips_reject_ref_names_that_point_elsewhere() -> anyhow::Result<()> {
-    let (repo, meta, mut db) = read_only_in_memory_scenario("four-diamond")?;
-    let merged_id = id_by_rev(&repo, "merged").detach();
-    let a_id = id_by_rev(&repo, "A").detach();
-    let a_ref = ref_name("refs/heads/A");
-
-    let err = Graph::from_commit_traversal_tips(
-        &repo,
-        [Tip::entrypoint(merged_id, Some(a_ref.clone()))],
-        &*meta,
-        but_core::ref_metadata::ProjectMeta::default(),
-        &mut db,
-        standard_options(),
-    )
-    .expect_err("ref names must resolve to their tip id");
-
-    assert_eq!(
-        err.to_string(),
-        format!("explicit traversal tip ref {a_ref} points to {a_id}, not {merged_id}")
     );
     Ok(())
 }
@@ -2462,7 +2335,7 @@ fn ad_hoc_order_keeps_bottom_branch_sitting_on_target() -> anyhow::Result<()> {
     snapbox::assert_data_eq!(
         graph_workspace(&graph.into_workspace()?).to_string(),
         snapbox::str![[r#"
-⌂:top <> ✓refs/remotes/origin/main on 960152d
+⌂:top <> ✓refs/heads/main on 960152d
 └── ≡:top on 960152d {1}
     ├── :top
     ├── :middle
@@ -2477,6 +2350,7 @@ fn ad_hoc_order_keeps_bottom_branch_sitting_on_target() -> anyhow::Result<()> {
 fn ad_hoc_order_hides_target_branch_at_base() -> anyhow::Result<()> {
     let (tmp, repo) = empty_repo()?;
     let tip = commit(&repo, "same tip")?;
+    // A remote ref alone does not configure an upstream: main is a local-only target.
     create_branches(&repo, tip, ["refs/heads/top", "refs/remotes/origin/main"])?;
     let meta = in_memory_meta(tmp.as_ref())?;
     let order = ["refs/heads/top", "refs/heads/main"];
@@ -2496,9 +2370,7 @@ fn ad_hoc_order_hides_target_branch_at_base() -> anyhow::Result<()> {
         graph_dag(&graph),
         snapbox::str![[r#"
 ◎  👉top
-│ ◎  origin/main
-├─╯
-◎  main[🌳] <> origin/main
+◎  main[🌳]
 ●  🏁·960152d (⌂|✓)
 "#]]
     );
@@ -2506,7 +2378,57 @@ fn ad_hoc_order_hides_target_branch_at_base() -> anyhow::Result<()> {
     snapbox::assert_data_eq!(
         graph_workspace(&graph.into_workspace()?).to_string(),
         snapbox::str![[r#"
-⌂:top <> ✓refs/remotes/origin/main on 960152d
+⌂:top <> ✓refs/heads/main on 960152d
+└── ≡:top on 960152d {1}
+    └── :top
+
+"#]]
+    );
+    Ok(())
+}
+
+#[test]
+fn ad_hoc_order_hides_target_branch_at_base_with_upstream() -> anyhow::Result<()> {
+    let (tmp, mut repo) = empty_repo()?;
+    let tip = commit(&repo, "same tip")?;
+    create_branches(&repo, tip, ["refs/heads/top", "refs/remotes/origin/main"])?;
+    {
+        let mut config = repo.config_snapshot_mut();
+        config.set_raw_value("remote.origin.url", "https://example.com/upstream.git")?;
+        config.set_raw_value("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")?;
+        config.set_raw_value("branch.main.remote", "origin")?;
+        config.set_raw_value("branch.main.merge", "refs/heads/main")?;
+    }
+    let meta = in_memory_meta(tmp.as_ref())?;
+    let order = ["refs/heads/top", "refs/heads/main"];
+    let overlay = Overlay::default().with_branch_stack_order_override(order.map(ref_name));
+    let graph = Graph::from_commit_traversal(
+        tip.attach(&repo),
+        Some(ref_name("refs/heads/top")),
+        &*meta,
+        default_project_meta(&repo),
+        &mut but_testsupport::in_memory_db(),
+        standard_options(),
+    )?
+    .redo_traversal_with_overlay(&repo, &*meta, overlay)?
+    .validated()?;
+
+    // Each ordered branch appears once, with main retaining its configured upstream.
+    snapbox::assert_data_eq!(
+        graph_dag(&graph),
+        snapbox::str![[r#"
+◎  👉top
+│ ◎  origin/main
+├─╯
+◎  main[🌳] <> origin/main
+●  🏁·960152d (⌂|✓)
+"#]]
+    );
+    // Tracking does not turn the local target into a feature segment.
+    snapbox::assert_data_eq!(
+        graph_workspace(&graph.into_workspace()?).to_string(),
+        snapbox::str![[r#"
+⌂:top <> ✓refs/heads/main on 960152d
 └── ≡:top on 960152d {1}
     └── :top
 
@@ -2518,7 +2440,7 @@ fn ad_hoc_order_hides_target_branch_at_base() -> anyhow::Result<()> {
 #[test]
 fn ad_hoc_branch_at_target_tip() -> anyhow::Result<()> {
     let tmp = but_testsupport::gix_testtools::tempfile::TempDir::new()?;
-    let repo = gix::ThreadSafeRepository::init_opts(
+    let mut repo = gix::ThreadSafeRepository::init_opts(
         tmp.path(),
         gix::create::Kind::WithWorktree,
         gix::create::Options::default(),
@@ -2526,7 +2448,7 @@ fn ad_hoc_branch_at_target_tip() -> anyhow::Result<()> {
     )?
     .to_thread_local();
     let m1 = commit(&repo, "M1")?;
-    create_branches(&repo, m1, ["refs/heads/feature"])?;
+    create_branches(&repo, m1, ["refs/heads/main", "refs/heads/feature"])?;
     repo.edit_reference(gix::refs::transaction::RefEdit::update(
         ref_name("HEAD"),
         ref_name("refs/heads/feature"),
@@ -2534,12 +2456,20 @@ fn ad_hoc_branch_at_target_tip() -> anyhow::Result<()> {
         "",
     ))?;
     let f1 = commit_with_parent(&repo, "F1", m1)?;
-    // The checked-out branch and the target both point at F1, while the target's local
-    // tracking branch `main` stayed behind at M1.
+    // The feature branch and remote target point at F1, while local main stays at M1.
     create_branches(&repo, f1, ["refs/remotes/origin/main"])?;
+    {
+        let mut config = repo.config_snapshot_mut();
+        config.set_raw_value("remote.origin.url", "https://example.com/upstream.git")?;
+        config.set_raw_value("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")?;
+        config.set_raw_value("branch.main.remote", "origin")?;
+        config.set_raw_value("branch.main.merge", "refs/heads/main")?;
+    }
     let meta = in_memory_meta(tmp.path())?;
     let project_meta = but_core::ref_metadata::ProjectMeta {
-        target_ref: Some(ref_name("refs/remotes/origin/main")),
+        target_ref: Some(but_core::ref_metadata::LocalRefName::new(ref_name(
+            "refs/heads/main",
+        ))?),
         ..Default::default()
     };
     let ws = Graph::from_head(
@@ -2552,12 +2482,23 @@ fn ad_hoc_branch_at_target_tip() -> anyhow::Result<()> {
     .validated()?
     .into_workspace()?;
 
-    // Without a stored target commit, the target ref's tip bounds the walk.
+    assert_eq!(
+        ws.target_ref_name().map(ToString::to_string),
+        Some("refs/heads/main".into()),
+        "the named target stays local"
+    );
+    assert_eq!(
+        ws.target_commit.as_ref().map(|target| target.commit_id),
+        Some(f1),
+        "the remote target supplies the cutoff despite the local target trailing behind"
+    );
+
+    // Without a stored target commit, the remote target's tip bounds the walk.
     // The empty feature branch remains visible because it isn't the local integration branch.
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
-⌂:feature[🌳] <> ✓refs/remotes/origin/main on d1b2aed
+⌂:feature[🌳] <> ✓refs/heads/main on d1b2aed
 └── ≡:feature[🌳] on d1b2aed {1}
     └── :feature[🌳]
 
@@ -2565,7 +2506,6 @@ fn ad_hoc_branch_at_target_tip() -> anyhow::Result<()> {
     );
     Ok(())
 }
-
 mod overlay;
 mod with_workspace;
 

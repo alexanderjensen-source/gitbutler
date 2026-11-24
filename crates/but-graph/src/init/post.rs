@@ -46,12 +46,10 @@ pub(super) struct Context<'a> {
     pub inserted_proxy_segments: Vec<SegmentIndex>,
     pub refs_by_id: RefsById,
     pub hard_limit: bool,
-    pub detach_entrypoint: bool,
     pub dangerously_skip_postprocessing_for_debugging: bool,
     pub worktree_by_branch: WorktreeByBranch,
 }
 
-/// Processing
 impl Graph {
     /// Now that the graph is complete, perform additional structural improvements with
     /// the requirement of them to be computationally cheap.
@@ -67,14 +65,12 @@ impl Graph {
             inserted_proxy_segments,
             refs_by_id,
             hard_limit,
-            detach_entrypoint,
             dangerously_skip_postprocessing_for_debugging,
             worktree_by_branch,
         }: Context<'_>,
     ) -> anyhow::Result<Self> {
         self.hard_limit_hit = hard_limit;
 
-        // Make sure edge order matches the git commit graph when traversed.
         self.rebuild_edges_in_parent_order();
 
         // Keep the original traversal tip available even if post-processing moves the
@@ -82,7 +78,7 @@ impl Graph {
         self.update_entrypoint_commit_id(tip);
 
         if dangerously_skip_postprocessing_for_debugging {
-            return self.finish_post_processing(detach_entrypoint);
+            return Ok(self);
         }
 
         // Before anything, cleanup the graph.
@@ -97,13 +93,7 @@ impl Graph {
         // traversal should have nothing to do with workspace details. It's just about laying
         // the foundation for figuring out our workspaces more easily.
         self.workspace_upgrades(meta, repo, &worktree_by_branch)?;
-        self.ad_hoc_branch_stack_upgrades(
-            repo,
-            meta,
-            &worktree_by_branch,
-            symbolic_remote_names,
-            configured_remote_tracking_branches,
-        )?;
+        self.ad_hoc_branch_stack_upgrades(repo, meta, &worktree_by_branch)?;
 
         // Point entrypoint to the right spot after all the virtual branches were added.
         self.set_entrypoint_to_ref_name(meta)?;
@@ -128,7 +118,7 @@ impl Graph {
         // anonymous segment from the refs left on its first commit, which would
         // re-couple a fork to the lane it points into. The pass maintains
         // remote/sibling links itself when it moves a name.
-        self.fork_out_refs_outside_lanes(meta, &worktree_by_branch)?;
+        self.fork_out_refs_outside_lanes(repo, meta, &worktree_by_branch)?;
         self.land_worktree_lanes_on_commits(meta, &worktree_by_branch)?;
 
         // Finally, once all segments were added, it's good to generations
@@ -136,20 +126,13 @@ impl Graph {
         self.compute_generation_numbers();
 
         self.symbolic_remote_names = symbolic_remote_names.to_vec();
-        self.finish_post_processing(detach_entrypoint)
-    }
-
-    fn finish_post_processing(mut self, detach_entrypoint: bool) -> anyhow::Result<Self> {
-        if detach_entrypoint {
-            self.detach_entrypoint_segment()?;
-        }
         Ok(self)
     }
 
     /// Rebuild outgoing edges so petgraph traversal follows the source commit's
     /// `parent_order`. Petgraph traverses edges in reverse creation order, so
     /// edges are re-added from last parent to first parent.
-    fn rebuild_edges_in_parent_order(&mut self) {
+    pub(crate) fn rebuild_edges_in_parent_order(&mut self) {
         for sidx in self.segments().collect::<Vec<_>>() {
             self.rebuild_outgoing_edges_in_parent_order(sidx);
         }
@@ -248,7 +231,7 @@ impl Graph {
                 .remove(ref_idx);
             if s.ref_info.is_some() {
                 // ref-name is known to not be the desired one, and the first commit of this segment has the name
-                // we seek. For that, we now create a new
+                // we seek, so it becomes a new segment of its own.
                 let new_ep_sidx_first_commit_idx = s.commits.first().map(|_| 0);
                 let mut entrypoint_segment = branch_segment_from_name_and_meta(
                     Some((desired_ref_name.ref_name, None)),
@@ -327,6 +310,11 @@ impl Graph {
     /// by checking incoming connections, instead they are expected to be either
     /// inline, i.e. virutal branch segments in a workspace, or they are
     /// named segments.
+    ///
+    /// Remote-tracking references among the [extra refs](crate::init::Options::extra_refs)
+    /// are kept wherever they rest, as named empty virtual segments pointing to their
+    /// commit. If it isn't the first of its segment, the segment is split there, and the
+    /// new segment stays anonymous as its commits aren't the remote's.
     fn fixup_remote_tracking_refs_and_maybe_split_segments<T: RefMetadata>(
         &mut self,
         meta: &OverlayMetadata<'_, T>,
@@ -335,12 +323,14 @@ impl Graph {
         struct SplitInfo {
             segment: SegmentIndex,
             commit: CommitIndex,
-            owner_ref: gix::refs::FullName,
+            /// Names the segment split off at `commit`, which is anonymous without it.
+            owner_ref: Option<gix::refs::FullName>,
             /// Additional remote-tracking refs at `commit` that should become
-            /// named empty virtual segments pointing to `owner_ref`.
+            /// named empty virtual segments pointing to the segment `commit` starts.
             virtual_refs: Vec<gix::refs::FullName>,
         }
 
+        let extra_refs = self.options.extra_refs.clone();
         let mut split_info = Vec::<SplitInfo>::new();
         for node in self.node_weights_mut() {
             let node_has_commits = node.commits.len() > 1;
@@ -356,18 +346,25 @@ impl Graph {
                     ri.ref_name.category().is_none_or(|c| {
                         if matches!(c, Category::RemoteBranch) {
                             // Always remove the ref, but keep info to create a split if possible.
-                            if is_splittable {
+                            if is_splittable || extra_refs.contains(&ri.ref_name) {
                                 if let Some(info) = split_info
                                     .iter_mut()
                                     .find(|info| info.segment == node.id && info.commit == cidx)
                                 {
                                     info.virtual_refs.push(ri.ref_name.clone());
+                                } else if is_splittable {
+                                    split_info.push(SplitInfo {
+                                        segment: node.id,
+                                        commit: cidx,
+                                        owner_ref: Some(ri.ref_name.clone()),
+                                        virtual_refs: Vec::new(),
+                                    });
                                 } else {
                                     split_info.push(SplitInfo {
                                         segment: node.id,
                                         commit: cidx,
-                                        owner_ref: ri.ref_name.clone(),
-                                        virtual_refs: Vec::new(),
+                                        owner_ref: None,
+                                        virtual_refs: vec![ri.ref_name.clone()],
                                     });
                                 }
                             }
@@ -381,14 +378,18 @@ impl Graph {
         }
 
         for info in split_info.into_iter().rev() {
-            let owner_sidx = self.split_segment(
-                info.segment,
-                info.commit,
-                Some(info.owner_ref),
-                None,
-                meta,
-                worktree_by_branch,
-            )?;
+            let owner_sidx = if info.commit == 0 {
+                info.segment
+            } else {
+                self.split_segment(
+                    info.segment,
+                    info.commit,
+                    info.owner_ref,
+                    None,
+                    meta,
+                    worktree_by_branch,
+                )?
+            };
             let owner_tip = self[owner_sidx]
                 .commits
                 .first()
@@ -571,7 +572,7 @@ impl Graph {
                                 .branch_opt(s.ref_name().expect("just set"))
                                 .ok()
                                 .flatten()
-                                .map(|md| SegmentMetadata::Branch(md.clone()));
+                                .map(SegmentMetadata::Branch);
                         }
                     }
                     _ => {
@@ -633,7 +634,9 @@ impl Graph {
                     .filter_map(|s| {
                         // This rule means that if there is no target, we'd want to put new independent stacks
                         // onto segments which then are ambiguous so they get pulled out.
-                        if target_ref.is_some() {
+                        // A local target may not have a named segment until postprocessing
+                        // finishes. Its resolved cutoff still provides a target boundary.
+                        if target_ref.is_some() || target_commit_sidx.is_some() {
                             return None;
                         }
                         // It's a very specialized filter… will that lead to strange behavior later?
@@ -1001,12 +1004,16 @@ impl Graph {
         });
 
         // Re-add in reverse because petgraph traverses newest edges first.
-        for (eid, target_sidx, _) in edges_pointing_to_named_segment.into_iter().rev() {
+        for (workspace_parent_order, (eid, target_sidx, _)) in edges_pointing_to_named_segment
+            .into_iter()
+            .enumerate()
+            .rev()
+        {
             let weight = self
                 .inner
                 .remove_edge(eid)
-                .expect("we found the edge before");
-            // Reconnect according to the new order.
+                .expect("we found the edge before")
+                .with_workspace_parent_order(workspace_parent_order as u32)?;
             self.inner.add_edge(ws_sidx, target_sidx, weight);
         }
 
@@ -1159,6 +1166,24 @@ impl Graph {
             Vec<(gix::refs::FullName, gix::refs::FullName, SegmentIndex)>,
         >::new();
 
+        let local_target_by_target_ref: BTreeMap<_, _> = self
+            .traversal_tips
+            .iter()
+            .filter(|tip| matches!(tip.role, TipRole::TargetRemote))
+            .filter_map(|tip| tip.ref_name.clone())
+            .filter_map(|target_ref| {
+                let (local_target, _remote) = repo
+                    .upstream_branch_and_remote_for_tracking_branch(target_ref.as_ref())
+                    .ok()??;
+                Some((target_ref, local_target))
+            })
+            .collect();
+        let pairs_with = |local: &gix::refs::FullName, remote: &gix::refs::FullName| {
+            local_target_by_target_ref
+                .get(remote)
+                .is_none_or(|local_target| local_target == local)
+        };
+
         let mut remote_sidx_by_ref_name = BTreeMap::new();
         for (remote_sidx, remote_ref_name) in self.inner.node_indices().filter_map(|sidx| {
             self[sidx]
@@ -1232,6 +1257,7 @@ impl Graph {
             };
             let (local, remote, remote_sidx) =
                 disambiguated_name.pop().expect("one item as checked above");
+            let pairs = pairs_with(&local, &remote);
             let commit_id = s.commits.first().with_context(no_commits)?.id;
             s.ref_info = Some(crate::RefInfo::from_ref(
                 local,
@@ -1239,15 +1265,16 @@ impl Graph {
                 worktree_by_branch,
             ));
             s.remote_tracking_ref_name = Some(remote);
-            s.remote_tracking_branch_segment_id = Some(remote_sidx);
+            s.remote_tracking_branch_segment_id = pairs.then_some(remote_sidx);
             let rn = s.ref_info.as_ref().expect("just set it");
             s.commits
                 .first_mut()
                 .with_context(no_commits)?
                 .refs
                 .retain(|crn| crn != rn);
-            // Assure the remote is also paired up!
-            self[remote_sidx].sibling_segment_id = Some(s.id);
+            if pairs {
+                self[remote_sidx].sibling_segment_id = Some(s.id);
+            }
         }
 
         // NOTE: setting this directly at iteration time isn't great as the post-processing then
@@ -1270,20 +1297,15 @@ impl Graph {
             if let Some(remote_sidx) = segment
                 .remote_tracking_ref_name
                 .as_ref()
+                .filter(|rn| pairs_with(ref_name, rn))
                 .and_then(|rn| remote_sidx_by_ref_name.remove(rn.as_ref()))
             {
                 segment.remote_tracking_branch_segment_id = Some(remote_sidx);
                 links_from_remote_to_local.push((remote_sidx, segment.id));
             }
         }
-        let workspace_target_refs: BTreeSet<_> = self
-            .traversal_tips
-            .iter()
-            .filter(|tip| matches!(tip.role, TipRole::TargetRemote))
-            .filter_map(|tip| tip.ref_name.clone())
-            .collect();
         for (remote_ref_name, remote_sidx) in remote_sidx_by_ref_name {
-            if !workspace_target_refs.contains(&remote_ref_name) {
+            if !local_target_by_target_ref.contains_key(&remote_ref_name) {
                 continue;
             }
             let Some(local_sidx) = self.ensure_local_tracking_segment_for_remote(
@@ -1484,7 +1506,7 @@ impl Graph {
     // Fill in generation numbers by walking down the graph topologically.
     // This is called at the end of post-processing to ensure generations are correct
     // after all segment insertions and edge rewiring.
-    fn compute_generation_numbers(&mut self) {
+    pub(crate) fn compute_generation_numbers(&mut self) {
         let mut topo = petgraph::visit::Topo::new(&self.inner);
         while let Some(sidx) = topo.next(&self.inner) {
             let max_gen_of_incoming = self
@@ -1511,8 +1533,6 @@ impl Graph {
         repo: &OverlayRepo<'_>,
         meta: &OverlayMetadata<'_, T>,
         worktree_by_branch: &WorktreeByBranch,
-        symbolic_remote_names: &[String],
-        configured_remote_tracking_branches: &BTreeSet<gix::refs::FullName>,
     ) -> anyhow::Result<()> {
         let Some(entrypoint_ref) = self.entrypoint_ref.clone() else {
             return Ok(());
@@ -1589,12 +1609,33 @@ impl Graph {
             let containing_commit = self.node_weights().find_map(|segment| {
                 segment
                     .commit_index_of(commit_id)
-                    .filter(|commit_idx| *commit_idx > 0)
                     .map(|commit_idx| (segment.id, commit_idx))
             });
             let bottom_segment_id = if let Some(segment_id) =
                 ad_hoc_order_bottom_segment_id(self, bottom_ref.as_ref(), commit_id)
             {
+                if self[segment_id].commits.is_empty()
+                    && let Some((owner_sidx, 0)) = containing_commit
+                    && self[owner_sidx].ref_name().is_some_and(|name| {
+                        matching_refs.iter().any(|branch| branch.as_ref() == name)
+                    })
+                {
+                    // The bottom ref may already have an empty segment above another
+                    // ordered branch. Give it the commits and parent edges so the
+                    // existing branch segments can be reordered without duplicating refs.
+                    let parent_edges = self
+                        .inner
+                        .edges_directed(owner_sidx, Direction::Outgoing)
+                        .map(EdgeOwned::from)
+                        .collect();
+                    self[segment_id].commits = std::mem::take(&mut self[owner_sidx].commits);
+                    let last_commit_id = self[segment_id].commits.last().map(|commit| commit.id);
+                    reconnect_outgoing_edges(
+                        &mut self.inner,
+                        parent_edges,
+                        (segment_id, last_commit_id),
+                    );
+                }
                 segment_id
             } else if let Some((segment_id, commit_idx)) = containing_commit {
                 self.split_segment(
@@ -1620,7 +1661,7 @@ impl Graph {
         }
 
         // The target commit is the base below every segment, so an ordered branch owning it
-        // is an empty segment sitting on that base, unless the branch tracks the target itself.
+        // is an empty segment sitting on that base, unless the branch is the target itself.
         let Some(target_commit_id) = self.project_meta.target_commit_id else {
             return Ok(());
         };
@@ -1630,23 +1671,48 @@ impl Graph {
             .cloned()
             .unwrap_or_default();
         let owner = self.node_weights().find_map(|segment| {
-            let ref_name = segment.ref_name()?;
-            (segment.commits.first()?.id == target_commit_id
-                && ordered_refs.iter().any(|o| o.as_ref() == ref_name))
-            .then_some((segment.id, ref_name))
+            let first_commit = segment
+                .commits
+                .first()
+                .filter(|commit| commit.id == target_commit_id)?;
+            let ref_name = match segment.ref_name() {
+                Some(ref_name) => ordered_refs.iter().find(|o| o.as_ref() == ref_name),
+                None => ordered_refs
+                    .iter()
+                    .rev()
+                    .find(|o| first_commit.refs.iter().any(|ri| ri.ref_name == **o)),
+            }?;
+            Some((segment.id, ref_name.clone()))
         });
         let Some((sidx, ref_name)) = owner else {
             return Ok(());
         };
-        let tracks_target = remotes::lookup_remote_tracking_branch_or_deduce_it(
-            repo,
-            ref_name,
-            symbolic_remote_names,
-            configured_remote_tracking_branches,
-        )? == self.project_meta.target_ref;
-        if !tracks_target {
-            self.split_segment(sidx, 0, None, None, meta, worktree_by_branch)?;
+        let is_target = self
+            .project_meta
+            .target_ref
+            .as_ref()
+            .is_some_and(|target_ref| target_ref.as_local_full_name_ref() == ref_name.as_ref());
+        if is_target {
+            return Ok(());
         }
+        if self[sidx].ref_info.is_none() {
+            let mut named = branch_segment_from_name_and_meta(
+                Some((ref_name.clone(), None)),
+                meta,
+                None,
+                worktree_by_branch,
+            )?;
+            if let Some(ref_info) = named.ref_info.as_mut() {
+                ref_info.commit_id = Some(target_commit_id);
+            }
+            let segment = &mut self[sidx];
+            segment.ref_info = named.ref_info;
+            segment.metadata = named.metadata;
+            if let Some(commit) = segment.commits.first_mut() {
+                commit.refs.retain(|ri| ri.ref_name != ref_name);
+            }
+        }
+        self.split_segment(sidx, 0, None, None, meta, worktree_by_branch)?;
         Ok(())
     }
 
@@ -1663,8 +1729,9 @@ impl Graph {
     /// relative to them must never rewrite the lane they point into. Wherever
     /// the branch currently lives - naming a commit-owning segment, chained
     /// into a lane as an empty segment, or riding on a commit in its refs -
-    /// it is re-attached uniformly as a fork: an empty segment nothing routes
-    /// through, whose only connection lands on its commit, with
+    /// it is re-attached uniformly as a fork: an empty segment only its own
+    /// worktree's branch order routes through, whose only connection lands on
+    /// its commit, with
     /// [`Self::land_worktree_lanes_on_commits()`] keeping that connection clear
     /// of the reference naming the commit. Refs remaining on the commit itself
     /// keep their usual meaning of moving with it.
@@ -1677,6 +1744,7 @@ impl Graph {
     /// built the graph, and the entrypoint ref.
     fn fork_out_refs_outside_lanes<T: RefMetadata>(
         &mut self,
+        repo: &OverlayRepo<'_>,
         meta: &OverlayMetadata<'_, T>,
         worktree_by_branch: &WorktreeByBranch,
     ) -> anyhow::Result<()> {
@@ -1697,12 +1765,64 @@ impl Graph {
             .filter(|ref_name| seen.insert(ref_name.clone()))
             .collect();
         let mut identity_left_the_lane = BTreeSet::new();
-        for ref_name in refs_outside_lanes {
-            if let Some((fork_sidx, vacated_sidx)) =
-                self.fork_out_ref(ref_name, meta, worktree_by_branch)?
-            {
-                identity_left_the_lane.insert(fork_sidx);
-                identity_left_the_lane.extend(vacated_sidx);
+        let mut forked = BTreeSet::new();
+        let mut entrypoint_stacked = None;
+        for tip in refs_outside_lanes {
+            let groups = ordered_ref_groups(repo, meta, tip.clone())?;
+            let (own_lane, entrypoint_stacked) =
+                if groups.iter().map(|(_, names)| names.len()).sum::<usize>() > 1 {
+                    if entrypoint_stacked.is_none() {
+                        entrypoint_stacked = Some(self.entrypoint_stacked_names(meta)?);
+                    }
+                    (
+                        self.first_parent_commits(groups[0].0),
+                        entrypoint_stacked.as_ref().expect("just computed"),
+                    )
+                } else {
+                    (BTreeSet::new(), &BTreeSet::new())
+                };
+            let may_join = |commit: ObjectId, ref_name: &gix::refs::FullName| {
+                *ref_name == tip
+                    || (own_lane.contains(&commit)
+                        && !entrypoint_stacked.contains(ref_name)
+                        && !worktree_by_branch.contains_key(ref_name))
+            };
+            let mut ordered = Vec::new();
+            let mut lane_tip = None;
+            for (commit, group) in groups {
+                let mut forks = Vec::new();
+                let mut claimed_elsewhere = false;
+                for ref_name in group {
+                    if !may_join(commit, &ref_name) || !forked.insert(ref_name.clone()) {
+                        claimed_elsewhere = true;
+                        break;
+                    }
+                    if let Some((fork_sidx, vacated_sidx)) =
+                        self.fork_out_ref(ref_name.clone(), meta, worktree_by_branch)?
+                    {
+                        identity_left_the_lane.insert(fork_sidx);
+                        identity_left_the_lane.extend(vacated_sidx);
+                        forks.push(fork_sidx);
+                        ordered.push(ref_name);
+                    }
+                }
+                let (Some(&top), Some(&bottom)) = (forks.first(), forks.last()) else {
+                    break;
+                };
+                for pair in forks.windows(2) {
+                    let [above, below] = *pair else { continue };
+                    self.reconnect_fork(above, below);
+                }
+                match lane_tip {
+                    None => lane_tip = Some(top),
+                    Some(lane_tip) => self.route_first_parent_through_forks(lane_tip, top, bottom),
+                }
+                if claimed_elsewhere {
+                    break;
+                }
+            }
+            if ordered.len() > 1 {
+                self.worktree_branch_stack_orders.push(ordered);
             }
         }
         // Anonymous lane segments may still carry sibling links planted by the
@@ -1743,7 +1863,7 @@ impl Graph {
     /// branches are extracted: routing through a remote reference is harmless
     /// as the editor never rewrites remotes, and workspace segments must
     /// survive as the workspace's own head.
-    fn land_worktree_lanes_on_commits<T: RefMetadata>(
+    pub(crate) fn land_worktree_lanes_on_commits<T: RefMetadata>(
         &mut self,
         meta: &OverlayMetadata<'_, T>,
         worktree_by_branch: &WorktreeByBranch,
@@ -1813,6 +1933,100 @@ impl Graph {
             );
         }
         owners
+    }
+
+    /// The branches the entrypoint's metadata stacks: those of the applied workspace stacks, or
+    /// the persisted order of the entrypoint's branch otherwise.
+    fn entrypoint_stacked_names<T: RefMetadata>(
+        &self,
+        meta: &OverlayMetadata<'_, T>,
+    ) -> anyhow::Result<BTreeSet<gix::refs::FullName>> {
+        let workspace = self
+            .entrypoint
+            .and_then(|(entrypoint, _)| self[entrypoint].workspace_metadata());
+        Ok(match (workspace, &self.entrypoint_ref) {
+            (Some(workspace), _) => workspace
+                .stacks(Applied)
+                .flat_map(|stack| &stack.branches)
+                .map(|branch| branch.ref_name.clone())
+                .collect(),
+            (None, Some(entrypoint_ref)) => meta
+                .branch_stack_order(entrypoint_ref.as_ref())?
+                .into_iter()
+                .flatten()
+                .collect(),
+            (None, None) => BTreeSet::new(),
+        })
+    }
+
+    fn first_parent_commits(&self, start: ObjectId) -> BTreeSet<ObjectId> {
+        let first_parent_by_id: BTreeMap<_, _> = self
+            .inner
+            .node_weights()
+            .flat_map(|segment| &segment.commits)
+            .map(|commit| (commit.id, commit.parent_ids.first().copied()))
+            .collect();
+        let mut commits = BTreeSet::new();
+        let mut cursor = Some(start);
+        while let Some(id) = cursor.filter(|id| commits.insert(*id)) {
+            cursor = first_parent_by_id.get(&id).copied().flatten();
+        }
+        commits
+    }
+
+    /// Make `fork` rest on `below` instead of the commit it was forked onto.
+    fn reconnect_fork(&mut self, fork: SegmentIndex, below: SegmentIndex) {
+        let outgoing: Vec<_> = self
+            .inner
+            .edges_directed(fork, Direction::Outgoing)
+            .map(|edge| edge.id())
+            .collect();
+        for edge in outgoing {
+            self.inner.remove_edge(edge);
+        }
+        self.connect_segments(fork, None, below, None);
+    }
+
+    /// Let the first-parent path from `lane_tip` enter the commit `bottom` rests on
+    /// through the fork chain `top..=bottom`, the way the worktree's branch order stacks them.
+    fn route_first_parent_through_forks(
+        &mut self,
+        lane_tip: SegmentIndex,
+        top: SegmentIndex,
+        bottom: SegmentIndex,
+    ) {
+        let Some(commit_sidx) = self
+            .inner
+            .edges_directed(bottom, Direction::Outgoing)
+            .next()
+            .map(|edge| edge.target())
+        else {
+            return;
+        };
+        let mut sidx = lane_tip;
+        let entering = loop {
+            let Some(edge) = self
+                .inner
+                .edges_directed(sidx, Direction::Outgoing)
+                .min_by_key(|edge| edge.weight().parent_order)
+            else {
+                return;
+            };
+            if edge.target() == commit_sidx {
+                break EdgeOwned::from(edge);
+            }
+            sidx = edge.target();
+        };
+        self.inner.remove_edge(entering.id);
+        self.inner.add_edge(
+            entering.source,
+            top,
+            Edge {
+                dst: None,
+                dst_id: None,
+                ..entering.weight
+            },
+        );
     }
 
     /// Returns the fork segment now carrying `ref_name` along with the lane
@@ -1992,11 +2206,36 @@ impl Graph {
                     dst,
                     dst_id,
                     parent_order: edge.weight.parent_order,
+                    workspace_parent_order: edge.weight.workspace_parent_order,
                 },
             );
             self.inner.remove_edge(edge.id);
         }
     }
+}
+
+/// `ref_name` and the existing branches its persisted stack order puts below it, grouped by
+/// the commit they point at.
+fn ordered_ref_groups<T: RefMetadata>(
+    repo: &OverlayRepo<'_>,
+    meta: &OverlayMetadata<'_, T>,
+    ref_name: gix::refs::FullName,
+) -> anyhow::Result<Vec<(ObjectId, Vec<gix::refs::FullName>)>> {
+    let order = meta
+        .branch_stack_order(ref_name.as_ref())?
+        .unwrap_or_else(|| vec![ref_name.clone()]);
+    let mut groups: Vec<(ObjectId, Vec<gix::refs::FullName>)> = Vec::new();
+    for name in order.into_iter().skip_while(|name| *name != ref_name) {
+        let Some(mut reference) = repo.try_find_reference(name.as_ref())? else {
+            continue;
+        };
+        let commit = reference.peel_to_id()?.detach();
+        match groups.last_mut() {
+            Some((group_commit, names)) if *group_commit == commit => names.push(name),
+            _ => groups.push((commit, vec![name])),
+        }
+    }
+    Ok(groups)
 }
 
 fn ad_hoc_order_bottom_segment_id(
@@ -2164,6 +2403,7 @@ fn rebuild_same_tip_segment_chain_by_branch_order<T: RefMetadata>(
                 dst: None,
                 dst_id: None,
                 parent_order: edge.weight.parent_order,
+                workspace_parent_order: edge.weight.workspace_parent_order,
             },
         );
     }
@@ -2279,7 +2519,6 @@ fn delete_anon_if_empty_and_reconnect(graph: &mut Graph, sidx: SegmentIndex) {
         ?sidx,
         "Deleting seemingly isolated and now completely unused segment"
     );
-    // Reconnect
     let new_target = first_outgoing.target();
     let incoming: Vec<_> = graph
         .inner
@@ -2302,6 +2541,7 @@ fn delete_anon_if_empty_and_reconnect(graph: &mut Graph, sidx: SegmentIndex) {
                 dst: target_commit_idx,
                 dst_id: target_commit_id,
                 parent_order: edge.weight.parent_order,
+                workspace_parent_order: edge.weight.workspace_parent_order,
             },
         );
     }
@@ -2457,8 +2697,6 @@ fn maybe_create_multiple_segments<T: RefMetadata>(
         );
         above_idx = new_segment;
         if is_first {
-            // connect incoming edges (and disconnect from source)
-            // Connect to the commit if we have one.
             let edges = collect_edges_at_commit_in_traversal_order(
                 &graph.inner,
                 (commit_parent_below, commit_idx),
@@ -2487,12 +2725,12 @@ fn maybe_create_multiple_segments<T: RefMetadata>(
                         dst: target_cidx,
                         dst_id: target_cidx.and_then(|_| commit.as_ref().map(|c| c.id)),
                         parent_order: edge.weight.parent_order,
+                        workspace_parent_order: edge.weight.workspace_parent_order,
                     },
                 );
             }
         }
         if is_last {
-            // connect outgoing edges (and disconnect them)
             if let Some((commit, commit_idx)) = commit.zip(commit_idx) {
                 let commit_id = commit.id;
                 graph[new_segment].commits.push(commit);
@@ -2547,6 +2785,7 @@ fn reconnect_outgoing_edges(
                 dst: edge.weight.dst,
                 dst_id: edge.weight.dst_id,
                 parent_order: edge.weight.parent_order,
+                workspace_parent_order: edge.weight.workspace_parent_order,
             },
         );
     }

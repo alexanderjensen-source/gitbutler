@@ -207,10 +207,9 @@ impl App {
         };
 
         let operation = match &selection.data {
-            StatusOutputLineData::MergeBase => NewOperation {
+            StatusOutputLineData::MergeBase => NewOperation::NewBranch {
                 ref_name: None,
                 base: None,
-                mode: but_api::worktrees::WorktreeCreationMode::Checkout,
             },
             StatusOutputLineData::Commit { cli_id, .. } => {
                 let CliId::Commit { commit, .. } = &**cli_id else {
@@ -227,10 +226,9 @@ impl App {
                     return Ok(());
                 }
 
-                NewOperation {
+                NewOperation::NewBranch {
                     ref_name: None,
                     base: Some(commit.commit_id),
-                    mode: but_api::worktrees::WorktreeCreationMode::Checkout,
                 }
             }
 

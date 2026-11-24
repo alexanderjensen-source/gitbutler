@@ -190,6 +190,37 @@ impl<'repo> OverlayRepo<'repo> {
         }
     }
 
+    /// The references whose names start with `prefix`, sorted by name, as the overlay sees them:
+    /// without those it drops, with those it overrides in place of the repository's, and with
+    /// those it adds where the repository has none of that name.
+    pub fn references_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> anyhow::Result<Vec<gix::Reference<'repo>>> {
+        let mut by_name = BTreeMap::new();
+        for reference in self.inner.references()?.prefixed(prefix)? {
+            let reference = reference.map_err(|err| anyhow::anyhow!(err))?;
+            by_name.insert(reference.name().to_owned(), reference);
+        }
+        let has_prefix = |name: &gix::refs::FullName| name.as_bstr().starts_with(prefix.as_bytes());
+        for (name, reference) in &self.nonoverriding_references {
+            if has_prefix(name) {
+                by_name
+                    .entry(name.clone())
+                    .or_insert_with(|| reference.clone().attach(self.inner));
+            }
+        }
+        for (name, reference) in &self.overriding_references {
+            if has_prefix(name) {
+                by_name.insert(name.clone(), reference.clone().attach(self.inner));
+            }
+        }
+        for name in &self.dropped_references {
+            by_name.remove(name);
+        }
+        Ok(by_name.into_values().collect())
+    }
+
     pub fn find_reference(
         &self,
         ref_name: &gix::refs::FullNameRef,
@@ -270,13 +301,13 @@ impl<'repo> OverlayRepo<'repo> {
                     return None;
                 }
                 let id = r.try_id()?;
-                let (id, name) =
-                    if matches!(r.name().category(), Some(gix::reference::Category::Tag)) {
-                        // TODO: also make use of the tag name (the tag object has its own name)
-                        (id.object().ok()?.peel_tags_to_end().ok()?.id, r.inner.name)
-                    } else {
-                        (id.detach(), r.inner.name)
-                    };
+                let id = if matches!(r.name().category(), Some(gix::reference::Category::Tag)) {
+                    // TODO: also make use of the tag name (the tag object has its own name)
+                    id.object().ok()?.peel_tags_to_end().ok()?.id
+                } else {
+                    id.detach()
+                };
+                let name = r.detach().name;
                 // This is only for overrides.
                 seen.insert(name.clone()).then_some((id, name))
             };
@@ -349,7 +380,7 @@ impl<'repo> OverlayRepo<'repo> {
             let Some(head) = head else {
                 return Ok(());
             };
-            let Some(wt) = head.repo.worktree() else {
+            let Some(wt) = head.repo().worktree() else {
                 return Ok(());
             };
             let wd = Worktree {
@@ -368,7 +399,7 @@ impl<'repo> OverlayRepo<'repo> {
             let mut cursor = if let Some(head_name) = main_head_referent {
                 overriding
                     .get(head_name)
-                    .map(|overridden_head| overridden_head.clone().attach(head.repo))
+                    .map(|overridden_head| overridden_head.clone().attach(head.repo()))
                     .or_else(|| head.try_into_referent())
             } else {
                 head.try_into_referent()

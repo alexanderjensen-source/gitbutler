@@ -1,5 +1,8 @@
 use but_api_macros::but_api;
-use but_core::{sync::RepoExclusive, ui::TreeChange};
+use but_core::{
+    sync::{RepoExclusive, RepoShared},
+    ui::TreeChange,
+};
 use but_ctx::Context;
 use but_hunk_assignment::{HunkAssignmentRequest, WorktreeChanges};
 use but_hunk_dependency::ui::hunk_dependencies_for_workspace_changes_by_worktree_dir;
@@ -13,7 +16,6 @@ boolean_enums::gen_boolean_enum!(pub serde ComputeLineStats);
 
 use but_core::diff::CommitDetails;
 
-/// JSON types
 // TODO: add schemars
 pub mod json {
     use but_core::diff::LineStats;
@@ -78,7 +80,7 @@ pub fn commit_details(
 ///
 /// This exists for callers that always want line statistics without passing
 /// `line_stats` explicitly.
-#[but_api(napi, json::CommitDetails, provides = [Commits])]
+#[but_api(json::CommitDetails)]
 #[instrument(err(Debug))]
 pub fn commit_details_with_line_stats(
     ctx: &Context,
@@ -87,40 +89,11 @@ pub fn commit_details_with_line_stats(
     commit_details(ctx, commit_id, ComputeLineStats::Yes)
 }
 
-/// Computes the combined changes of the commits from `oldest` to `newest`,
-/// both included, with line statistics: the tree of `newest` against the tree
-/// of `oldest`'s first parent, or against an empty tree when `oldest` is a root
-/// commit.
-///
-/// `oldest` is expected to be `newest` or one of its first-parent ancestors;
-/// otherwise the result is the plain difference between the two trees. It
-/// returns what `branch_diff` returns, so a caller can show a part of a branch
-/// the way it shows all of it.
-#[but_api(napi, provides = [Commits])]
-#[instrument(err(Debug))]
-pub fn commit_range_diff(
-    ctx: &Context,
-    oldest: gix::ObjectId,
-    newest: gix::ObjectId,
-) -> anyhow::Result<but_core::ui::TreeChanges> {
-    let repo = ctx.repo.get()?;
-    let base = repo
-        .find_commit(oldest)?
-        .parent_ids()
-        .next()
-        .map(|id| id.detach());
-    let (changes, stats) = but_core::diff::tree_changes_with_line_stats(&repo, base, newest)?;
-    Ok(but_core::ui::TreeChanges {
-        changes: changes.into_iter().map(Into::into).collect(),
-        stats: stats.into(),
-    })
-}
-
 /// Produces a unified patch for `change`.
 ///
 /// `change` must not be a type change or a submodule change. For lower-level
 /// implementation details, see [`but_core::TreeChange::unified_patch()`].
-#[but_api(napi, provides = [Diffs])]
+#[but_api]
 #[instrument(err(Debug))]
 pub fn tree_change_diffs(
     ctx: &Context,
@@ -134,9 +107,8 @@ pub fn tree_change_diffs(
 /// Like [`tree_change_diffs()`], reading `change` from the checkout `changes_source`
 /// names, so a linked worktree's uncommitted changes diff against its own files.
 ///
-/// A linked worktree requires the `worktreeManipulation` feature flag and an active
-/// worktree, see `worktrees::open_changes_source()`.
-#[but_api(napi, provides = [Diffs])]
+/// A linked worktree has to be active, see `worktrees::open_changes_source()`.
+#[but_api]
 #[instrument(err(Debug))]
 pub fn tree_change_diffs_from_source(
     ctx: &Context,
@@ -166,27 +138,26 @@ fn worktree_changes_with_modification_times(
 }
 
 /// See [`changes_in_worktree_with_perm()`].
-#[but_api(napi, provides = [WorktreeChanges])]
+#[but_api]
 #[instrument(err(Debug))]
 pub fn changes_in_worktree(
-    ctx: &mut Context,
+    ctx: &Context,
     changes_source: ChangesSource,
     compute_deps_and_assignments: bool,
 ) -> anyhow::Result<WorktreeChanges> {
-    let mut guard = ctx.exclusive_worktree_access();
+    let guard = ctx.shared_worktree_access();
     changes_in_worktree_with_perm(
         ctx,
         changes_source,
         compute_deps_and_assignments,
-        guard.write_permission(),
+        guard.read_permission(),
     )
 }
 
 /// This UI-version of [`but_core::diff::worktree_changes()`] simplifies the `git status` information for display in
 /// the user interface as it is right now. From here, it's always possible to add more information as the need arises.
 ///
-/// `changes_source` selects the checkout to inspect. Reading a linked worktree
-/// requires the `worktreeManipulation` feature flag and an active worktree, see
+/// `changes_source` selects the checkout to inspect. A linked worktree has to be active, see
 /// `worktrees::open_changes_source()`.
 ///
 /// ### Notable Transformations
@@ -199,25 +170,34 @@ pub fn changes_in_worktree(
 /// When dependency and assignment computation is turned off, hunk assignments and dependencies
 /// are not computed at all: `assignments` is empty and there are no `dependencies`.
 ///
-/// A linked worktree is not part of the workspace, so it has neither - the flag is
-/// ignored for it, and nothing is persisted.
+/// A linked worktree is not part of the workspace: its hunks all come back unassigned,
+/// it has no dependencies, and nothing is persisted.
 ///
 /// For lower-level implementation details, see
 /// [`but_core::diff::worktree_changes()`],
 /// [`but_hunk_assignment::assignments_with_fallback()`], and
 /// [`but_hunk_dependency::ui::hunk_dependencies_for_workspace_changes_by_worktree_dir()`].
-#[but_api(napi)]
+#[but_api]
 #[instrument(skip_all, err(Debug))]
 pub fn changes_in_worktree_with_perm(
-    ctx: &mut Context,
+    ctx: &Context,
     changes_source: ChangesSource,
     compute_deps_and_assignments: bool,
-    perm: &mut RepoExclusive,
+    perm: &RepoShared,
 ) -> anyhow::Result<WorktreeChanges> {
     let context_lines = ctx.settings.context_lines;
 
     if let Some((_name, wt_repo)) = crate::worktrees::open_changes_source(ctx, &changes_source)? {
-        return Ok(worktree_changes_with_modification_times(&wt_repo)?.into());
+        let changes = worktree_changes_with_modification_times(&wt_repo)?;
+        if !compute_deps_and_assignments {
+            return Ok(changes.into());
+        }
+        let assignments =
+            but_hunk_assignment::unassigned(&wt_repo, changes.changes.clone(), context_lines);
+        return Ok(WorktreeChanges {
+            assignments,
+            ..changes.into()
+        });
     }
 
     if !compute_deps_and_assignments {
@@ -225,7 +205,7 @@ pub fn changes_in_worktree_with_perm(
         return Ok(worktree_changes_with_modification_times(&repo)?.into());
     }
 
-    let (repo, ws, mut db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
+    let (repo, ws, mut db) = ctx.workspace_and_db_mut_with_perm(perm)?;
 
     let changes = but_core::diff::worktree_changes(&repo)?;
 
@@ -268,29 +248,32 @@ pub fn changes_in_worktree_with_perm(
 /// Persists `assignments` for the current workspace without creating an oplog
 /// entry.
 ///
+/// This acquires shared worktree access from `ctx` before writing
+/// assignments.
+///
 /// See [`assign_hunk_only_with_perm()`] for details.
 #[but_api]
 #[instrument(skip_all, err(Debug))]
 pub fn assign_hunk_only(
-    ctx: &mut Context,
+    ctx: &Context,
     assignments: Vec<HunkAssignmentRequest>,
 ) -> anyhow::Result<()> {
-    let mut guard = ctx.exclusive_worktree_access();
-    assign_hunk_only_with_perm(ctx, assignments, guard.write_permission())
+    let guard = ctx.shared_worktree_access();
+    assign_hunk_only_with_perm(ctx, assignments, guard.read_permission())
 }
 
-/// Persists `assignments` under caller-held exclusive repository access without
+/// Persists `assignments` under caller-held shared repository access without
 /// creating an oplog entry.
 ///
 /// For lower-level implementation details, see
 /// [`but_hunk_assignment::assign()`].
 pub fn assign_hunk_only_with_perm(
-    ctx: &mut Context,
+    ctx: &Context,
     assignments: Vec<HunkAssignmentRequest>,
-    perm: &mut RepoExclusive,
+    perm: &RepoShared,
 ) -> anyhow::Result<()> {
     let context_lines = ctx.settings.context_lines;
-    let (repo, ws, mut db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
+    let (repo, ws, mut db) = ctx.workspace_and_db_mut_with_perm(perm)?;
     but_hunk_assignment::assign(
         db.hunk_assignments_mut()?,
         &repo,
@@ -308,7 +291,7 @@ pub fn assign_hunk_only_with_perm(
 /// assignments.
 ///
 /// See [`assign_hunk_with_perm()`] for details.
-#[but_api(napi)]
+#[but_api]
 #[instrument(skip_all, err(Debug))]
 pub fn assign_hunk(
     ctx: &mut Context,
@@ -325,7 +308,7 @@ pub fn assign_hunk(
 /// best-effort `MoveHunk` oplog snapshot and commits the snapshot only if the
 /// assignment succeeds.
 pub fn assign_hunk_with_perm(
-    ctx: &mut Context,
+    ctx: &Context,
     assignments: Vec<HunkAssignmentRequest>,
     perm: &mut RepoExclusive,
 ) -> anyhow::Result<()> {
@@ -338,7 +321,7 @@ pub fn assign_hunk_with_perm(
         but_core::DryRun::No,
     );
 
-    let res = assign_hunk_only_with_perm(ctx, assignments, perm);
+    let res = assign_hunk_only_with_perm(ctx, assignments, perm.read_permission());
     if let Some(snapshot) = maybe_oplog_entry
         && res.is_ok()
     {

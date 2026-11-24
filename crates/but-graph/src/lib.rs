@@ -196,10 +196,10 @@
 //! as projections are inherently lossy.
 //! Thus, it's useful create projects with links back to the segments that the information was extracted from.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
+pub mod nosegment;
 mod segment;
-/// Use this for basic types like [`petgraph::Direction`], and graph algorithms.
+mod topowalk;
 pub use petgraph;
 pub use segment::{
     Commit, CommitFlags, RefInfo, Segment, SegmentFlags, SegmentMetadata, StopCondition, Worktree,
@@ -208,7 +208,6 @@ pub use segment::{
 
 mod api;
 pub use api::FirstParent;
-/// Produce a graph from a Git repository.
 pub mod init;
 
 #[path = "projection/mod.rs"]
@@ -226,13 +225,10 @@ mod debug;
 /// That way we can tell where a segment branches off, despite the graph only connecting segments, and not commits.
 pub type CommitIndex = usize;
 
-/// A graph of connected segments that represent a section of the actual commit-graph.
 #[derive(Default, Debug, Clone)]
 #[must_use]
 pub struct Graph {
     inner: init::PetGraph,
-    /// From where the graph was created. This is useful if one wants to focus on a subset of the graph.
-    ///
     /// This is `None` only for a freshly default-initialized graph, or while a graph is being assembled before
     /// the first segment is inserted. Graphs returned by the traversal constructors are expected to have an
     /// entrypoint, even for unborn refs; in that case the segment is present and the commit is
@@ -264,7 +260,8 @@ pub struct Graph {
     /// an ordinary ad-hoc lower-bound branch and the bottom branch of a
     /// GitButler-created dependent branch chain.
     ad_hoc_branch_stack_orders: Vec<Vec<gix::refs::FullName>>,
-    /// It's `true` only if we have stopped the traversal due to a hard limit.
+    /// The persisted local branch orders of linked worktrees, each from the checked-out branch down.
+    worktree_branch_stack_orders: Vec<Vec<gix::refs::FullName>>,
     hard_limit_hit: bool,
     /// The options used to create the graph, which allows it to regenerate itself after something
     /// possibly changed. This can also be used to simulate changes by injecting would-be information.
@@ -292,8 +289,10 @@ pub struct Graph {
     /// itself has checked out, and the entrypoint ref - as well as refs the
     /// traversal could not place.
     pub worktree_tips: Vec<init::WorktreeTip>,
-    /// Project-wide metadata used for target ref, target commit, and push remote resolution.
     pub project_meta: but_core::ref_metadata::ProjectMeta,
+    /// Configured target upstream, derived during traversal even if its ref or segment is absent.
+    /// Refreshed when traversal is redone; projection must not infer it from segment links.
+    target_upstream_ref: Option<gix::refs::FullName>,
     /// All remote names that aren't URLs and that were retrieved during the traversal.
     ///
     /// They are useful to extract remote names from remote tracking refs like `refs/remotes/origin/master`,
@@ -303,8 +302,6 @@ pub struct Graph {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EntryPointCommit {
-    /// The traversal tip is known.
-    ///
     /// This is an object id rather than a synthetic index because an empty entrypoint segment has no commit slot
     /// to index into, nor is it reliably reachable by traversing the graph. If the commit is present in the
     /// entrypoint segment, its [`CommitIndex`] can be derived from the segment and this id.
@@ -314,7 +311,6 @@ pub(crate) enum EntryPointCommit {
     /// already a graph, and one that isn't representable even with symbolic refs as the workspace ref segment
     /// can easily point to multiple refs at the same time.
     AtCommit(gix::ObjectId),
-    /// The traversal started from an unborn ref and has no tip commit.
     Unborn,
 }
 
@@ -348,14 +344,9 @@ impl Graph {
     }
 }
 
-/// A resolved entry point into the graph for easy access to the entrypoint segment and,
-/// if present, the commit that started traversal along with the segment that owns it.
 #[derive(Debug, Copy, Clone)]
 pub struct EntryPoint<'graph> {
-    /// The segment that served starting point for the traversal into this graph.
     pub segment: &'graph Segment,
-    /// If present, the commit that started traversal and the segment that owns it.
-    ///
     /// This can differ from [`Self::segment`] when post-processing moved the entrypoint to an
     /// empty synthetic segment, such as a virtual workspace tip segment.
     ///
@@ -365,16 +356,13 @@ pub struct EntryPoint<'graph> {
 }
 
 impl<'graph> EntryPoint<'graph> {
-    /// The commit that started traversal, if the entrypoint is not unborn.
     pub fn commit(&self) -> Option<&'graph Commit> {
         self.commit_and_owner.map(|(c, _)| c)
     }
 }
 
-/// Relationship of one segment to another in terms of graph ancestry.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SegmentRelation {
-    /// Both segment indices point to the same segment.
     Identity,
     /// The first segment is an ancestor of the second segment.
     Ancestor,
@@ -409,9 +397,24 @@ pub struct Edge {
     ///
     /// This limit would only be reached if there is a merge with 4.3 billion commits.
     pub(crate) parent_order: u32,
+    pub(crate) workspace_parent_order: Option<u32>,
 }
 
 impl Edge {
+    /// Return the 0-based position of the stack this edge leads to among the stacks of its
+    /// workspace, in the order the workspace metadata lists them.
+    ///
+    /// This is `None` unless the edge leaves a workspace segment that has metadata.
+    pub fn workspace_parent_order(&self) -> Option<u32> {
+        self.workspace_parent_order
+    }
+
+    /// Place the stack this edge leads to at the 0-based `position` among the stacks of its workspace.
+    pub(crate) fn with_workspace_parent_order(mut self, position: u32) -> anyhow::Result<Self> {
+        self.workspace_parent_order = Some(position);
+        Ok(self)
+    }
+
     /// Return the 0-based position of this edge's destination among the source commit's parents.
     /// For instance, if the source is a merge commit and this edge represents the connection
     /// to the second parent, the output will be `Some(1)`.
@@ -449,5 +452,4 @@ impl Edge {
         self
     }
 }
-/// An index into the [`Graph`].
 pub type SegmentIndex = petgraph::graph::NodeIndex;

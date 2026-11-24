@@ -1,74 +1,31 @@
-//! Helpers to keep virtual-branches metadata synchronized between TOML and the project database.
+//! Storage for virtual-branches metadata: the project database, plus a TOML copy for older clients.
 
-use std::{
-    cmp::Ordering, collections::HashMap, io::Read as _, path::Path, str::FromStr, time::UNIX_EPOCH,
-};
+use std::{collections::HashMap, io::Read as _, path::Path, str::FromStr, time::UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow, bail};
-use but_core::ref_metadata::{ProjectMeta, StackId};
+use but_core::ref_metadata::StackId;
 use but_db::{VbStack, VbStackHead, VbState, VirtualBranchesSnapshot};
 use gitbutler_reference::{Refname, RemoteRefname};
 use sha2::{Digest, Sha256};
 
 use crate::virtual_branches_legacy_types::{Stack, StackBranch, VirtualBranches};
 
-#[derive(serde::Deserialize)]
-struct LegacyProjectMetaFile {
-    default_target: Option<LegacyTarget>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyTarget {
-    remote_name: String,
-    branch_name: String,
-    sha: String,
-    push_remote_name: Option<String>,
-}
-
-/// Read the project metadata that older versions stored in `virtual_branches.toml` without
-/// opening or migrating the project database.
-pub fn read_legacy_project_meta(path: &Path) -> anyhow::Result<Option<ProjectMeta>> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    let Some(target) = toml::from_str::<LegacyProjectMetaFile>(&content)?.default_target else {
-        return Ok(None);
-    };
-    let target_commit_id = gix::ObjectId::from_str(&target.sha)?;
-    Ok(Some(ProjectMeta {
-        target_ref: Some(
-            format!("refs/remotes/{}/{}", target.remote_name, target.branch_name).try_into()?,
-        ),
-        target_commit_id: (!target_commit_id.is_null()).then_some(target_commit_id),
-        push_remote: target.push_remote_name,
-    }))
-}
-
-/// Read virtual-branches state using DB as runtime source of truth while synchronizing with TOML.
+/// Read virtual-branches state from the DB, which is the source of truth.
 ///
-/// The synchronization rules are:
-/// * if DB is uninitialized, TOML is imported if valid; otherwise DB is initialized with empty state.
-/// * if TOML is newer than DB metadata and valid, DB is overwritten with TOML.
-/// * if TOML is invalid, TOML is rewritten from DB state.
-/// * if TOML is missing, it is recreated from DB state.
+/// An uninitialized DB starts empty and never imports the TOML file, which is only written for
+/// older clients.
 pub fn read_synced_virtual_branches(path: &Path) -> anyhow::Result<VirtualBranches> {
     let mut db = db_handle_from_toml_path(path)?;
     let mut tx = db.immediate_transaction()?;
-    let state = ensure_vb_storage_in_sync(path, &mut tx)?;
+    let state = read_or_init_vb_storage(path, &mut tx)?;
     tx.commit()?;
     Ok(state)
 }
 
 /// Write virtual-branches `vb_state` to DB and TOML, keeping sync metadata up-to-date.
-///
-/// This always runs synchronization first to resolve any newer TOML changes before applying `data`.
 pub fn write_virtual_branches_and_sync(path: &Path, vb: &VirtualBranches) -> anyhow::Result<()> {
     let mut db = db_handle_from_toml_path(path)?;
     let mut tx = db.immediate_transaction()?;
-    ensure_vb_storage_in_sync(path, &mut tx)?;
     let mut db_state = snapshot_state(path, &tx)?.unwrap_or_default().state;
     if !db_state.initialized {
         db_state.initialized = true;
@@ -80,116 +37,27 @@ pub fn write_virtual_branches_and_sync(path: &Path, vb: &VirtualBranches) -> any
     tx.commit()?;
     // The single choke point for metadata writes, so touching the sentinel here surfaces
     // out-of-process writes. Read-only syncs don't route through here.
-    but_project_handle::write_refresh_sentinel(path);
+    if let Some(storage_dir) = path.parent() {
+        but_project_handle::write_refresh_sentinel(storage_dir);
+    }
     Ok(())
 }
 
-/// Import TOML into DB if TOML is valid, overwriting existing data forcefully.
-///
-/// This is meant for oplog restore and similar flows where TOML was restored externally.
-pub fn import_toml_into_db(path: &Path) -> anyhow::Result<()> {
-    let info = read_toml_info(path)?;
-    let TomlInfo::Parsed(parsed) = info else {
-        bail!("Cannot import TOML into DB: TOML does not exist or is invalid");
-    };
-
-    let mut db = db_handle_from_toml_path(path)?;
-    let mut tx = db.immediate_transaction()?;
-    let mut state = snapshot_state(path, &tx)?.unwrap_or_default().state;
-    state.initialized = true;
-    parsed.update_last_seen_metadata_on(&mut state);
-    let snapshot = legacy_to_snapshot(&parsed.data, into_db_toml_file_info(state))?;
-    persist_snapshot(&mut tx, snapshot)?;
-    tx.commit()?;
-    Ok(())
-}
-
-fn ensure_vb_storage_in_sync(
+fn read_or_init_vb_storage(
     path: &Path,
     tx: &mut but_db::Transaction<'_>,
 ) -> anyhow::Result<VirtualBranches> {
     let snapshot = snapshot_state(path, tx)?.unwrap_or_default();
-    let toml_info = read_toml_info(path)?;
-
-    if !snapshot.state.initialized {
-        let mut state = snapshot.state;
-        state.initialized = true;
-        return match toml_info {
-            TomlInfo::Parsed(parsed) => {
-                parsed.update_last_seen_metadata_on(&mut state);
-                let db_snapshot = legacy_to_snapshot(&parsed.data, into_db_toml_file_info(state))?;
-                persist_snapshot(tx, db_snapshot)?;
-                Ok(parsed.data)
-            }
-            TomlInfo::Missing | TomlInfo::Invalid => {
-                let empty = VirtualBranches::default();
-                let info = write_toml(path, &empty)?;
-                info.update_last_seen_metadata_on(&mut state);
-                let db_snapshot = legacy_to_snapshot(&empty, into_db_toml_file_info(state))?;
-                persist_snapshot(tx, db_snapshot)?;
-                Ok(empty)
-            }
-        };
+    if snapshot.state.initialized {
+        return snapshot_to_legacy(&snapshot);
     }
 
-    match toml_info {
-        TomlInfo::Missing => {
-            let db_data = snapshot_to_legacy(&snapshot)?;
-            let info = write_toml(path, &db_data)?;
-            let mut updated = snapshot;
-            info.update_last_seen_metadata_on(&mut updated.state);
-            persist_snapshot(tx, updated)?;
-            Ok(db_data)
-        }
-        TomlInfo::Parsed(parsed) => {
-            match toml_compare(&snapshot.state, parsed.mtime_ns, &parsed.sha256_hexdigest) {
-                // Toml is newer
-                Ordering::Greater => {
-                    let mut state = snapshot.state;
-                    parsed.update_last_seen_metadata_on(&mut state);
-                    let db_snapshot =
-                        legacy_to_snapshot(&parsed.data, into_db_toml_file_info(state))?;
-                    persist_snapshot(tx, db_snapshot)?;
-                    Ok(parsed.data)
-                }
-                Ordering::Equal => Ok(snapshot_to_legacy(&snapshot)?),
-                // Toml is older
-                Ordering::Less => {
-                    let db_data = snapshot_to_legacy(&snapshot)?;
-                    let info = write_toml(path, &db_data)?;
-                    let mut updated = snapshot;
-                    info.update_last_seen_metadata_on(&mut updated.state);
-                    persist_snapshot(tx, updated)?;
-                    Ok(db_data)
-                }
-            }
-        }
-        TomlInfo::Invalid => {
-            let db_data = snapshot_to_legacy(&snapshot)?;
-            let info = write_toml(path, &db_data)?;
-            let mut updated = snapshot;
-            info.update_last_seen_metadata_on(&mut updated.state);
-            persist_snapshot(tx, updated)?;
-            Ok(db_data)
-        }
-    }
-}
-
-/// Compare observed TOML metadata against DB sync metadata.
-///
-/// Returns `Ordering::Greater` when TOML is newer than what DB has last seen.
-/// Returns `Ordering::Equal` when TOML has the same mtime and sha256 as last seen.
-/// Returns `Ordering::Less` when TOML is older than DB's last-seen metadata.
-fn toml_compare(state: &VbState, mtime_ns: i64, sha256: &str) -> Ordering {
-    match state.toml_last_seen_mtime_ns {
-        None => Ordering::Greater,
-        Some(last_seen) if mtime_ns > last_seen => Ordering::Greater,
-        Some(last_seen) if mtime_ns < last_seen => Ordering::Less,
-        Some(_last_seen_is_equal) => match state.toml_last_seen_sha256.as_deref() {
-            Some(last_seen_sha256) if last_seen_sha256 == sha256 => Ordering::Equal,
-            Some(_) | None => Ordering::Greater,
-        },
-    }
+    let mut state = snapshot.state;
+    state.initialized = true;
+    let empty = VirtualBranches::default();
+    let db_snapshot = legacy_to_snapshot(&empty, into_db_toml_file_info(state))?;
+    persist_snapshot(tx, db_snapshot)?;
+    Ok(empty)
 }
 
 /// Fail loudly when failing to open a database as this really should work, it's just the normal
@@ -203,8 +71,7 @@ fn db_handle_from_toml_path(path: &Path) -> anyhow::Result<but_db::DbHandle> {
         );
     };
 
-    // Special case: in read-only tests, the TOML file is always authoritative, don't write
-    // into read-only fixtures. It's bad we have to do this.
+    // Special case: don't write into read-only test fixtures. It's bad we have to do this.
     if path
         .iter()
         .any(|component| component == "generated-do-not-edit")
@@ -262,33 +129,6 @@ fn write_toml(path: &Path, data: &VirtualBranches) -> anyhow::Result<TomlFileSta
         mtime_ns,
         sha256_hexdigest: sha256_hex_hash(&bytes),
     })
-}
-
-/// Parse [`VirtualBranches`] from `path` with a lot of error handling.
-fn read_toml_info(path: &Path) -> anyhow::Result<TomlInfo> {
-    let (bytes, metadata) = match read_file_bytes_and_metadata(path) {
-        Ok(out) => out,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(TomlInfo::Missing),
-        Err(err) => return Err(err.into()),
-    };
-    let mtime_ns = file_mtime_ns(&metadata)?;
-    let content = match String::from_utf8(bytes.clone()) {
-        Ok(content) => content,
-        Err(_err) => {
-            return Ok(TomlInfo::Invalid);
-        }
-    };
-    match toml::from_str::<VirtualBranches>(&content) {
-        Ok(data) => {
-            let sha256 = sha256_hex_hash(&bytes);
-            Ok(TomlInfo::Parsed(ParsedToml {
-                data,
-                mtime_ns,
-                sha256_hexdigest: sha256,
-            }))
-        }
-        Err(_err) => Ok(TomlInfo::Invalid),
-    }
 }
 
 /// This should work for the case where the date is before the unix epoch,
@@ -359,7 +199,10 @@ fn legacy_to_snapshot(
         out_stacks.push(VbStack {
             id: stack_id.to_string(),
             source_refname: source_refname.as_ref().map(ToString::to_string),
-            upstream_remote_name: upstream.as_ref().map(|up| up.remote().to_owned()),
+            upstream_remote_name: upstream
+                .as_ref()
+                .and_then(|up| up.remote())
+                .map(|remote| remote.to_owned()),
             upstream_branch_name: upstream.as_ref().map(|up| up.branch().to_owned()),
             sort_order: i64::try_from(*order).context("Stack order exceeds i64")?,
             in_workspace: *in_workspace,
@@ -533,25 +376,6 @@ fn snapshot_to_legacy(snapshot: &VirtualBranchesSnapshot) -> anyhow::Result<Virt
     })
 }
 
-enum TomlInfo {
-    Missing,
-    Parsed(ParsedToml),
-    Invalid,
-}
-
-struct ParsedToml {
-    data: VirtualBranches,
-    mtime_ns: i64,
-    sha256_hexdigest: String,
-}
-
-impl ParsedToml {
-    fn update_last_seen_metadata_on(&self, state: &mut VbState) {
-        state.toml_last_seen_mtime_ns = Some(self.mtime_ns);
-        state.toml_last_seen_sha256 = Some(self.sha256_hexdigest.clone());
-    }
-}
-
 struct TomlFileState {
     mtime_ns: i64,
     sha256_hexdigest: String,
@@ -569,7 +393,6 @@ struct DbTomlFileState {
     toml_last_seen_sha256: Option<String>,
 }
 
-/// Extract just the parts that corelate the db state with the toml file from `db_state`.
 fn into_db_toml_file_info(db_state: VbState) -> DbTomlFileState {
     DbTomlFileState {
         toml_last_seen_mtime_ns: db_state.toml_last_seen_mtime_ns,

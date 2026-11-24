@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use bstr::{BStr, BString};
 use but_api::{
     WorkspaceState,
@@ -16,13 +18,15 @@ use crate::{
     CliError, CliResult, IdMap,
     args::{
         OutputFormat,
-        atoms::{BranchOrCommit, Purpose},
+        atoms::{BranchOrCommit, MessageFileArg, Purpose},
         reword2::Platform,
     },
     bad_input,
     command::legacy::{
         ShowDiffInEditor,
-        commit_message_prep::{normalize_commit_message, should_update_commit_message},
+        commit_message_prep::{
+            normalize_commit_message, read_commit_message, should_update_commit_message,
+        },
         reword::get_commit_message_from_editor as get_commit_message_from_editor_legacy,
     },
     id::CommitId,
@@ -148,7 +152,7 @@ pub fn reword(
 ) -> CliResult<(RewordOutcome, Option<WorkspaceState>)> {
     let mut guard = ctx.exclusive_worktree_access();
     let mut meta = ctx.meta()?;
-    let id_map = IdMap::new_from_context(ctx, guard.read_permission())?;
+    let id_map = IdMap::new_from_context(ctx, guard.read_permission(), None)?;
     let merged = MergedUpstream::from_ctx(ctx, args.allow_merged)?;
     let operation = resolve(ctx, &mut out, &id_map, args, &merged)?;
 
@@ -286,9 +290,7 @@ pub fn run(
                 )?;
                 commit_details.commit.inner.message.to_string()
             };
-            let new_message = Some(but_action::commit_format::format_commit_message(
-                &current_message,
-            ));
+            let new_message = Some(but_core::commit::format_commit_message(&current_message));
             let (outcome, ws) =
                 reword_commit(ctx, meta, perm, target, &current_message, new_message)?;
             Ok((outcome, ws))
@@ -308,7 +310,7 @@ pub fn run(
     }
 }
 
-fn edit_commit_message(
+pub(super) fn edit_commit_message(
     repo: &gix::Repository,
     context_lines: u32,
     commit_details: CommitDetails,
@@ -370,29 +372,7 @@ pub enum BranchNameSource {
     },
 }
 
-impl RewordOperation {
-    #[expect(dead_code)]
-    fn will_open_editor(&self) -> bool {
-        match self {
-            RewordOperation::Commit { new_message, .. } => new_message.will_open_editor(),
-            RewordOperation::FormatCommit { .. } => false,
-            RewordOperation::Branch { new_name, .. } => new_name.will_open_editor(),
-        }
-    }
-}
-
-impl BranchNameSource {
-    fn will_open_editor(&self) -> bool {
-        match self {
-            BranchNameSource::Provided(_) => false,
-            BranchNameSource::Editor { .. } => true,
-        }
-    }
-}
-
 impl CommitMessageSource {
-    /// Check if this message source will open an editor.
-    ///
     /// Used by the TUI to suspend itself.
     pub fn will_open_editor(&self) -> bool {
         match self {
@@ -410,16 +390,25 @@ impl CommitMessageSource {
     pub fn from_args(
         no_message: bool,
         message: Option<Vec<String>>,
+        file: Option<&MessageFileArg>,
+        current_dir: &Path,
         format: OutputFormat,
     ) -> CliResult<Self> {
-        match (no_message, message) {
-            (true, None) => Ok(Self::Empty),
-            (false, None) if !format.allows_human_ui() => Ok(Self::Keep),
-            (false, None) => Ok(Self::Editor { initial: None }),
-            (false, Some(message)) => Ok(Self::Provided(message.join("\n\n"))),
-            (true, Some(_)) => {
-                Err(bad_input("--no-message and --message cannot be used at the same time").into())
+        match (no_message, message, file) {
+            (true, None, None) => Ok(Self::Empty),
+            (false, Some(message), None) => Ok(Self::Provided(message.join("\n\n"))),
+            (false, None, Some(file)) => {
+                Ok(Self::Provided(read_commit_message(file, current_dir)?))
             }
+            (false, None, None) if !format.allows_human_ui() => Ok(Self::Keep),
+            (false, None, None) => Ok(Self::Editor { initial: None }),
+            (true, Some(_), None)
+            | (true, None, Some(_))
+            | (true, Some(_), Some(_))
+            | (false, Some(_), Some(_)) => Err(bad_input(
+                "Only one of --message, --file and --no-message can be used at the same time",
+            )
+            .into()),
         }
     }
 
@@ -482,6 +471,7 @@ fn reword_commit(
         meta,
         perm,
         snapshot_details,
+        &[],
         DryRun::No,
         |mut tx| {
             let new_commit =

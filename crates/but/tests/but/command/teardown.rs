@@ -41,9 +41,6 @@ Exiting GitButler mode...
 
 You are now on branch: A
 
-To return to GitButler mode, run:
-  but setup
-
 
 "#]]);
 
@@ -95,9 +92,6 @@ Exiting GitButler mode...
 ✓ Successfully exited GitButler mode!
 
 You are now on branch: A
-
-To return to GitButler mode, run:
-  but setup
 
 
 "#]]);
@@ -178,9 +172,6 @@ Attempting to fix workspace stacks...
 
 You are now on branch: A
 
-To return to GitButler mode, run:
-  but setup
-
 
 "#]]);
 
@@ -200,6 +191,47 @@ To return to GitButler mode, run:
     assert!(
         content_b.contains("FileForB\n"),
         "File B should contain the modifications"
+    );
+}
+
+/// A commit on top of `gitbutler/workspace` stops most commands, so the refusal
+/// has to say why and what `teardown` will do. Following it has to do what it says.
+#[test]
+fn commit_on_workspace_refusal_says_what_teardown_does() {
+    let env =
+        Sandbox::init_scenario_with_target_and_default_settings("teardown-two-dangling-commits");
+    env.setup_metadata(&["A", "B"]);
+
+    env.but("status")
+        .assert()
+        .failure()
+        .stdout_eq(str![])
+        .stderr_eq(str![[r#"
+Error: The tip of gitbutler/workspace is not a workspace commit, most likely because `git commit` added a commit on top of it.
+
+Hint: Run `but teardown`. It undoes commits on top of the workspace commit and keeps their changes as uncommitted. It then leaves workspace mode on one applied branch; the others stay unapplied until you run `but apply <branch>`.
+
+"#]]);
+
+    env.but("teardown").assert().success();
+    assert_eq!(env.invoke_git("rev-parse --abbrev-ref HEAD"), "A");
+    assert_eq!(
+        env.invoke_git("status --porcelain"),
+        "A  FileForA\nA  FileForB"
+    );
+
+    env.but("apply B").assert().success();
+    assert_eq!(
+        env.invoke_git("rev-parse --abbrev-ref HEAD"),
+        "gitbutler/workspace"
+    );
+    assert!(
+        env.projects_root().join("B").exists(),
+        "the other branch is back in the working directory"
+    );
+    assert!(
+        env.projects_root().join("FileForA").exists(),
+        "the undone commits' changes survive applying the other branch"
     );
 }
 
@@ -254,13 +286,8 @@ fn json_output_with_dangling_commits() {
 
 #[test]
 fn teardown_informs_of_checkout_to_when_there_are_no_stacks() {
-    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
-    // Keep the managed workspace: in single-branch mode unapply would check out a plain branch.
-    env.but("config feature single-branch disable")
-        .assert()
-        .success();
-    env.setup_metadata(&["A"]);
-    env.but("unapply A").assert().success();
+    let env = Sandbox::init_scenario_with_target_and_default_settings("zero-stacks");
+    env.setup_metadata(&[]);
 
     env.but("teardown")
         .assert()
@@ -273,13 +300,9 @@ Error: Failed to determine checkout target branch. Specify a target branch with 
 
 #[test]
 fn teardown_checks_out_to_branch_override() {
-    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
-    // Keep the managed workspace: in single-branch mode unapply would check out a plain branch.
-    env.but("config feature single-branch disable")
-        .assert()
-        .success();
-    env.setup_metadata(&["A"]);
-    env.but("unapply A").assert().success();
+    let env = Sandbox::init_scenario_with_target_and_default_settings("zero-stacks");
+    env.setup_metadata(&[]);
+    env.invoke_git("branch A main");
 
     env.but("--json teardown")
         .arg("--checkout-to")
@@ -309,13 +332,9 @@ fn teardown_checks_out_to_branch_override() {
 
 #[test]
 fn teardown_checks_out_to_branch_override_with_qualified_ref_name() {
-    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
-    // Keep the managed workspace: in single-branch mode unapply would check out a plain branch.
-    env.but("config feature single-branch disable")
-        .assert()
-        .success();
-    env.setup_metadata(&["A"]);
-    env.but("unapply A").assert().success();
+    let env = Sandbox::init_scenario_with_target_and_default_settings("zero-stacks");
+    env.setup_metadata(&[]);
+    env.invoke_git("branch A main");
 
     env.but("--json teardown")
         .arg("--checkout-to")
@@ -462,9 +481,6 @@ Exiting GitButler mode...
 ⚠ Exited GitButler mode, but some GitButler hooks could not be removed (see warnings above).
 
 You are now on branch: A
-
-To return to GitButler mode, run:
-  but setup
 
 
 "#]]);

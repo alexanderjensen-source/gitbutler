@@ -8,7 +8,6 @@ use but_api::open::program::ProgramSpec;
 use but_ctx::Context;
 use but_settings::AppSettingsWithDiskSync;
 use crossterm::event::{Event, MouseButton, MouseEventKind};
-use gitbutler_operating_modes::OperatingMode;
 use gix::refs::FullName;
 use ratatui::prelude::*;
 
@@ -77,7 +76,6 @@ mod tests;
 const NOOP: &str = "noop";
 const CURSOR_CONTEXT_ROWS: usize = 3;
 
-/// How much does the detail area grow/shrink with when adjusted
 const DETAILS_SIZE_ADJUSTMENT_PERCENTAGE: u16 = 5;
 
 const DETAILS_MIN_SIZE_PERCENTAGE: u16 = 30;
@@ -86,7 +84,6 @@ const DETAILS_MAX_SIZE_PERCENTAGE: u16 = 90;
 pub fn render_tui(
     ctx: &mut Context,
     out: &mut InputOutputChannel<'_>,
-    operating_mode: OperatingMode,
     flags: StatusFlags,
     status_lines: Vec<StatusOutputLine>,
     launch_options: TuiLaunchOptions,
@@ -107,7 +104,6 @@ pub fn render_tui(
         Vec::from([watcher_rx]),
         head_sha,
         Clipboard::live(),
-        operating_mode,
     )?;
 
     let messages = Vec::new();
@@ -221,11 +217,21 @@ where
     Ok(())
 }
 
-fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut Vec<Message>) {
+fn event_to_messages(
+    ev: Event,
+    app: &App,
+    terminal_area: Rect,
+    messages: &mut Vec<Message>,
+    ignore_user_inputs: bool,
+) {
     let key_binds = app.active_key_binds();
     let mode = &*app.mode;
     match ev {
         Event::Key(key) => {
+            if ignore_user_inputs {
+                return;
+            }
+
             let mut handled = false;
             let selection = app
                 .cursor
@@ -275,6 +281,10 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
             messages.push(Message::JustRender);
         }
         Event::Paste(_) => {
+            if ignore_user_inputs {
+                return;
+            }
+
             if let Some(message) = app
                 .modal
                 .as_ref()
@@ -315,52 +325,60 @@ fn event_to_messages(ev: Event, app: &App, terminal_area: Rect, messages: &mut V
         Event::FocusLost => {
             messages.push(Message::SetHasFocus(false));
         }
-        Event::Mouse(event) => match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if app.modal.is_none() {
-                    messages.push(Message::StatusClick(Position {
-                        x: event.column,
-                        y: event.row,
-                    }));
-                }
+        Event::Mouse(event) => {
+            if ignore_user_inputs {
+                return;
             }
-            MouseEventKind::ScrollDown => {
-                if mouse_is_over_help(app, terminal_area, event.column, event.row) {
-                    messages.push(Message::Help(HelpMessage::ScrollDown(3)));
-                } else if app.modal.is_none() {
-                    if mouse_is_over_debug(app, terminal_area, event.column, event.row) {
-                        messages.push(Message::DebugScrollDown(3));
-                    } else if mouse_is_over_details(app, terminal_area, event.column, event.row) {
-                        messages.push(Message::Details(DetailsMessage::ScrollDown(3)));
-                    } else if render::status_area_for_app(app, terminal_area)
-                        .is_some_and(|area| area.contains((event.column, event.row).into()))
-                    {
-                        messages.push(Message::StatusScroll(1));
+
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if app.modal.is_none() {
+                        messages.push(Message::StatusClick(Position {
+                            x: event.column,
+                            y: event.row,
+                        }));
                     }
                 }
-            }
-            MouseEventKind::ScrollUp => {
-                if mouse_is_over_help(app, terminal_area, event.column, event.row) {
-                    messages.push(Message::Help(HelpMessage::ScrollUp(3)));
-                } else if app.modal.is_none() {
-                    if mouse_is_over_debug(app, terminal_area, event.column, event.row) {
-                        messages.push(Message::DebugScrollUp(3));
-                    } else if mouse_is_over_details(app, terminal_area, event.column, event.row) {
-                        messages.push(Message::Details(DetailsMessage::ScrollUp(3)));
-                    } else if render::status_area_for_app(app, terminal_area)
-                        .is_some_and(|area| area.contains((event.column, event.row).into()))
-                    {
-                        messages.push(Message::StatusScroll(-1));
+                MouseEventKind::ScrollDown => {
+                    if mouse_is_over_help(app, terminal_area, event.column, event.row) {
+                        messages.push(Message::Help(HelpMessage::ScrollDown(3)));
+                    } else if app.modal.is_none() {
+                        if mouse_is_over_debug(app, terminal_area, event.column, event.row) {
+                            messages.push(Message::DebugScrollDown(3));
+                        } else if mouse_is_over_details(app, terminal_area, event.column, event.row)
+                        {
+                            messages.push(Message::Details(DetailsMessage::ScrollDown(3)));
+                        } else if render::status_area_for_app(app, terminal_area)
+                            .is_some_and(|area| area.contains((event.column, event.row).into()))
+                        {
+                            messages.push(Message::StatusScroll(1));
+                        }
                     }
                 }
+                MouseEventKind::ScrollUp => {
+                    if mouse_is_over_help(app, terminal_area, event.column, event.row) {
+                        messages.push(Message::Help(HelpMessage::ScrollUp(3)));
+                    } else if app.modal.is_none() {
+                        if mouse_is_over_debug(app, terminal_area, event.column, event.row) {
+                            messages.push(Message::DebugScrollUp(3));
+                        } else if mouse_is_over_details(app, terminal_area, event.column, event.row)
+                        {
+                            messages.push(Message::Details(DetailsMessage::ScrollUp(3)));
+                        } else if render::status_area_for_app(app, terminal_area)
+                            .is_some_and(|area| area.contains((event.column, event.row).into()))
+                        {
+                            messages.push(Message::StatusScroll(-1));
+                        }
+                    }
+                }
+                MouseEventKind::Moved
+                | MouseEventKind::Down(..)
+                | MouseEventKind::Up(..)
+                | MouseEventKind::Drag(..)
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight => {}
             }
-            MouseEventKind::Moved
-            | MouseEventKind::Down(..)
-            | MouseEventKind::Up(..)
-            | MouseEventKind::Drag(..)
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {}
-        },
+        }
     }
 }
 
@@ -382,32 +400,57 @@ fn mouse_is_over_details(app: &App, terminal_area: Rect, column: u16, row: u16) 
         .is_some_and(|area| area.contains(Position { x: column, y: row }))
 }
 
-fn start_watcher(
-    ctx: &mut Context,
-    tx: Sender<Message>,
-) -> anyhow::Result<gitbutler_watcher::WatcherHandle> {
+fn start_watcher(ctx: &mut Context, tx: Sender<Message>) -> anyhow::Result<Sender<()>> {
+    let project_id = ctx.legacy_project.id.clone();
+    let workdir = ctx.workdir_or_fail()?;
+    let events_tx = tx.clone();
+
+    let runtime = tokio::runtime::Handle::current();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+
     let app_settings = app_settings_sync()?;
     let watch_mode = gitbutler_watcher::WatchMode::from_env_or_settings(
         &app_settings.get()?.feature_flags.watch_mode,
         |key| std::env::var(key).ok(),
     );
 
-    let handler = gitbutler_watcher::Handler::new(move |change| {
-        _ = tx.send(Message::WatcherEvent(change));
-        Ok(())
-    });
+    std::thread::Builder::new()
+        .name("tui-watcher-setup".into())
+        // spawn in new thread to prevent slow first render
+        .spawn(move || {
+            let _runtime = runtime.enter();
 
-    let project_id = ctx.legacy_project.id.clone();
+            let handler = gitbutler_watcher::Handler::new(move |change| {
+                _ = events_tx.send(Message::WatcherEvent(change));
+                Ok(())
+            });
 
-    let watcher = gitbutler_watcher::watch_in_background(
-        handler,
-        ctx.workdir_or_fail()?,
-        project_id,
-        app_settings,
-        watch_mode,
-    )?;
+            match gitbutler_watcher::watch_in_background(
+                handler,
+                workdir,
+                project_id,
+                app_settings,
+                watch_mode,
+            )
+            .context("failed to start watcher in background")
+            {
+                Ok(_watcher) => {
+                    // Immediately refresh as we might have missed events during watcher startup
+                    if tx.send(Message::Reload(None, ReloadCause::Manual)).is_ok() {
+                        // This blocks with the sole purpose of keeping watcher alive. On first
+                        // receive we move on and drop the watcher.
+                        let _ = stop_rx.recv();
+                    }
+                    // If send failed, TUI has already dropped the receiving channel (exited), so we
+                    // drop the watcher.
+                }
+                Err(err) => {
+                    let _ = tx.send(Message::FatalError(err));
+                }
+            };
+        })?;
 
-    Ok(watcher)
+    Ok(stop_tx)
 }
 
 fn app_settings_sync() -> anyhow::Result<AppSettingsWithDiskSync> {
@@ -423,7 +466,6 @@ fn app_settings_sync() -> anyhow::Result<AppSettingsWithDiskSync> {
 
 #[derive(Debug)]
 pub enum Message {
-    // Lifecycle
     JustRender,
     Quit,
     ConfirmAndQuit,
@@ -431,6 +473,7 @@ pub enum Message {
     CloseCommitFileListAfterConfirmingOperation,
     Reload(Option<SelectAfterReload>, ReloadCause),
     ShowError(anyhow::Error),
+    FatalError(anyhow::Error),
     ShowToast {
         kind: ToastKind,
         text: Text<'static>,
@@ -449,7 +492,6 @@ pub enum Message {
     UnfocusDetails,
     WatcherEvent(gitbutler_watcher::Change),
 
-    // Cursor movement
     MoveCursorUp(usize),
     MoveCursorDown(usize),
     MoveCursorPreviousSection,
@@ -460,7 +502,6 @@ pub enum Message {
     SelectBranch(FullName),
     SelectWorktree(BString),
 
-    // Features
     Commit(CommitMessage),
     Squash(SquashMessage),
     Reword(RewordMessage),
@@ -483,16 +524,11 @@ pub enum Message {
     Redo,
     ShowModal(Modal),
 
-    // Utilities
     CopySelection,
     CopySelectionPicker,
     CopyToClipboard(String),
     #[expect(clippy::enum_variant_names)]
     RegisterOutOfBandMessage(Receiver<Message>),
-    AndThen {
-        lhs: Box<Message>,
-        rhs: Box<Message>,
-    },
     #[allow(dead_code)]
     Debug(&'static str),
     OpenInProgram(ProgramSpec, Openable),
@@ -507,17 +543,6 @@ pub enum Message {
 fn message_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<Message>();
-}
-
-impl Message {
-    /// Send another message only if handling the first succeeds.
-    #[expect(dead_code)]
-    pub fn and_then(self, other: Self) -> Self {
-        Self::AndThen {
-            lhs: Box::new(self),
-            rhs: Box::new(other),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -537,8 +562,6 @@ pub enum DetailsLayoutMessage {
     Dismiss,
 }
 
-/// The cause for a reload.
-///
 /// Used to surpress watcher triggered reloads that happen after an operation from the TUI. Otherwise
 /// we'd get double reloads after performing an operation from the TUI since that changes the git
 /// repo which triggers the watcher.
@@ -547,10 +570,11 @@ pub enum ReloadCause {
     /// Reloading because some mutation was made by the TUI.
     Mutation,
     /// Reloading because the watcher came back with an event.
-    Watcher { details_selection_changed: bool },
+    Watcher {
+        details_selection_changed: bool,
+    },
     /// Reloading only because some TUI view state changed, not because any real data changed.
     ViewOnly,
-    /// The user manually triggered a reload.
     Manual,
 }
 
@@ -560,18 +584,24 @@ pub enum FilesMessage {
     ToggleFilesForSelectedCommit,
 }
 
-/// What to select after reloading
 #[derive(Debug)]
 pub enum SelectAfterReload {
     Commit(gix::ObjectId),
     FirstFileInCommit(gix::ObjectId),
-    #[expect(dead_code)]
-    UncommittedFile {
-        path: BString,
-    },
     UncommittedDetailsSection {
         index: usize,
         direction: ScrollDirection,
+    },
+    /// The same commit, or file in it, after discarding changes rewrote the commit.
+    ///
+    /// A file list of the commit moves to the new commit, or closes when that is empty.
+    RewrittenCommit {
+        /// The commit the changes were discarded from.
+        source: gix::ObjectId,
+        /// The commit that replaced `source`.
+        new_commit: gix::ObjectId,
+        /// The index and scroll direction of the details section to select.
+        details_section: Option<(usize, ScrollDirection)>,
     },
     Branch(String),
     CliId(Box<CliId>),
@@ -621,7 +651,6 @@ where
 fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec<Message>) {
     fn is_repo_mutation(m: &Message) -> bool {
         match m {
-            Message::AndThen { lhs, rhs } => is_repo_mutation(lhs) || is_repo_mutation(rhs),
             Message::Reload(_, cause) => match cause {
                 ReloadCause::Mutation
                 | ReloadCause::Watcher { .. }
@@ -630,7 +659,7 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             },
             Message::Confirm(message) => match message {
                 ConfirmMessage::Confirm | ConfirmMessage::Yes => true,
-                ConfirmMessage::Left | ConfirmMessage::Right | ConfirmMessage::No => false,
+                ConfirmMessage::Left | ConfirmMessage::Right | ConfirmMessage::Close => false,
             },
             Message::Commit(message) => match message {
                 CommitMessage::CreateEmpty
@@ -664,7 +693,9 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             },
             Message::Move(message) => match message {
                 MoveMessage::Confirm | MoveMessage::MoveToNewBranch => true,
-                MoveMessage::Start | MoveMessage::ToggleInsertSide => false,
+                MoveMessage::Start | MoveMessage::StartWith(..) | MoveMessage::ToggleInsertSide => {
+                    false
+                }
             },
             Message::CherryPick(message) => match message {
                 CherryPickMessage::Confirm | CherryPickMessage::CherryPickToNewBranch => true,
@@ -749,6 +780,7 @@ fn dedup_mutation_messages(messages: &mut Vec<Message>, other_messages: &mut Vec
             | Message::EnterNormalModeAfterConfirmingOperation
             | Message::CloseCommitFileListAfterConfirmingOperation
             | Message::ShowError(..)
+            | Message::FatalError(..)
             | Message::ShowToast { .. }
             | Message::DropToBeDiscarded
             | Message::GrowDetails

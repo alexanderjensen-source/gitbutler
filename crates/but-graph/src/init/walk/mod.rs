@@ -1,4 +1,3 @@
-//! Utilities for graph-walking specifically.
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +11,7 @@ use petgraph::{Direction, prelude::EdgeRef};
 
 use crate::{
     Commit, CommitFlags, CommitIndex, Edge, Graph, Segment, SegmentIndex, SegmentMetadata,
-    Worktree,
+    StopCondition, Worktree,
     init::{
         Goals, PetGraph,
         overlay::{OverlayMetadata, OverlayRepo},
@@ -302,6 +301,7 @@ fn split_connections(
                     .transpose()?,
                 dst_id: edge.weight.dst_id,
                 parent_order: edge.weight.parent_order,
+                workspace_parent_order: edge.weight.workspace_parent_order,
             },
         );
     }
@@ -411,7 +411,6 @@ pub fn queue_parents(
     if is_shallow_boundary {
         return Ok(false);
     }
-    // Don't enqueue new parents if we don't have space anymore.
     if next.is_exhausted() {
         return Ok(next.hard_limit_hit());
     }
@@ -551,7 +550,7 @@ pub fn disambiguate_refs_by_branch_metadata<'a, T: RefMetadata>(
         .map(|(rn, md)| (rn.clone(), md.cloned()))
 }
 
-fn extract_local_branch_metadata<T: RefMetadata>(
+pub(crate) fn extract_local_branch_metadata<T: RefMetadata>(
     ref_name: &gix::refs::FullNameRef,
     meta: &OverlayMetadata<'_, T>,
 ) -> anyhow::Result<Option<SegmentMetadata>> {
@@ -566,7 +565,7 @@ fn extract_local_branch_metadata<T: RefMetadata>(
         // through the current tip.
         .or_else(|| {
             meta.workspace_opt(ref_name)
-                .map(|res| res.map(|md| SegmentMetadata::Workspace(md.clone())))
+                .map(|res| res.map(SegmentMetadata::Workspace))
                 .transpose()
         })
         .transpose()
@@ -576,9 +575,7 @@ fn extract_local_branch_metadata<T: RefMetadata>(
 #[derive(Debug, Clone)]
 pub struct TraverseInfo {
     inner: gix::traverse::commit::Info,
-    /// The pre-parsed commit if available.
     commit: Option<Commit>,
-    /// A means of sorting the entry on the queue.
     pub(crate) gen_then_time: GenThenTime,
 }
 
@@ -623,8 +620,6 @@ impl Ord for GenThenTime {
 }
 
 impl TraverseInfo {
-    /// Convert this traversal item into a graph [`Commit`].
-    ///
     /// `flags` are the graph-specific classifications collected for this
     /// commit during traversal. `refs` are the fully-qualified ref names that
     /// peel to this commit and should be attached to the resulting commit.
@@ -823,23 +818,19 @@ pub fn propagate_flags_downward(
     let mut stack = vec![(dst_sidx, dst_commit)];
 
     while let Some((segment, first_commit_index)) = stack.pop() {
-        // Select the range of commits to process in this segment
         let commit_range = if let Some(start_commit_idx) = first_commit_index {
             let segment_ref = &graph[segment];
             start_commit_idx..segment_ref.commits.len()
         } else {
-            // Empty segment, no commits to process
             0..0
         };
 
-        // Mark all commits in range with flags
         if !commit_range.is_empty() {
             for commit in &mut graph[segment].commits[commit_range.clone()] {
                 commit.flags |= flags_to_add;
             }
         }
 
-        // Process outgoing edges
         let mut neighbors = graph
             .neighbors_directed(segment, petgraph::Direction::Outgoing)
             .detach();
@@ -879,7 +870,6 @@ pub fn propagate_flags_downward(
 }
 
 pub(crate) struct RemoteQueueOutcome {
-    /// The new tips to queue officially later.
     pub items_to_queue_later: Vec<QueueItem>,
     /// A way for the remote to find the local tracking branch.
     pub maybe_make_id_a_goal_so_remote_can_find_local: CommitFlags,
@@ -1030,6 +1020,15 @@ pub fn possibly_split_occupied_segment(
 
     // Standins will cause this, avoid self-connection.
     if src_sidx != bottom_sidx {
+        if top_cidx.is_none()
+            && let Some(ref_name) = graph[src_sidx].ref_name().map(ToOwned::to_owned)
+        {
+            // The empty segment already represents this ref. Leaving it on the
+            // commit would create a second reference node in the editor.
+            graph[bottom_sidx].commits[bottom_cidx]
+                .refs
+                .retain(|info| info.ref_name != ref_name);
+        }
         graph.connect_segments_with_ids(
             src_sidx,
             top_cidx,
@@ -1131,6 +1130,43 @@ pub fn prune_integrated_tips(graph: &mut Graph, next: &mut Queue) -> anyhow::Res
     }
 
     next.exhaust();
+    Ok(())
+}
+
+/// Queue the parents of each walk that stopped before its history ended, as if it had gone on.
+/// A resumed walk only goes on while a queued tip still seeks a goal in the history it carries,
+/// so tips queued after the traversal can meet history it cut short.
+pub fn resume_stopped_walks(
+    graph: &Graph,
+    next: &mut Queue,
+    commit_graph: Option<&gix::commitgraph::Graph>,
+    objects: &impl gix::objs::Find,
+    buf: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    for sidx in graph.segments() {
+        if !graph
+            .stop_condition(sidx)
+            .is_some_and(|condition| condition.contains(StopCondition::Limit))
+        {
+            continue;
+        }
+        let segment = &graph[sidx];
+        let Some(last_commit) = segment.commits.last() else {
+            continue;
+        };
+        queue_parents(
+            next,
+            &last_commit.parent_ids,
+            last_commit.flags,
+            sidx,
+            segment.commits.len() - 1,
+            Limit::spent(),
+            false,
+            commit_graph,
+            objects,
+            buf,
+        )?;
+    }
     Ok(())
 }
 

@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use but_ctx::ProjectHandleOrLegacyProjectId;
+use but_ctx::{Context, ProjectHandleOrLegacyProjectId};
 use but_settings::AppSettingsWithDiskSync;
 pub use handler::Handler;
 use tokio::{sync::mpsc::unbounded_channel, task};
@@ -14,17 +14,13 @@ use tokio_util::sync::CancellationToken;
 mod events;
 
 pub use events::Change;
-use gitbutler_filemonitor::{FileMonitorHandle, InternalEvent};
+use gitbutler_filemonitor::{FileMonitorHandle, InternalEvent, LinkedWorktree};
 
 mod handler;
 
-/// Re-export for convenience
 pub use gitbutler_filemonitor::WatchMode;
 
-/// An abstraction over a link to the spawned watcher, which runs in the background.
 pub struct WatcherHandle {
-    /// The id of the project we are watching.
-    project_id: ProjectHandleOrLegacyProjectId,
     /// Must be dropped synchronously so disconnecting its command channel unblocks
     /// `BlockingPool::shutdown` during Tokio runtime teardown.
     file_monitor: FileMonitorHandle,
@@ -40,11 +36,6 @@ impl Drop for WatcherHandle {
 }
 
 impl WatcherHandle {
-    /// Return the id of the project we are watching.
-    pub fn project_id(&self) -> &ProjectHandleOrLegacyProjectId {
-        &self.project_id
-    }
-
     pub fn flush(&self) -> Result<()> {
         self.file_monitor.flush()
     }
@@ -77,13 +68,16 @@ pub fn watch_in_background(
     let file_monitor = gitbutler_filemonitor::spawn(
         project_id.clone(),
         worktree_path.as_ref(),
-        events_out.clone(),
+        {
+            let project_id = project_id.clone();
+            move || active_linked_worktrees(project_id.clone())
+        },
+        events_out,
         watch_mode,
     )?;
 
     let cancellation_token = CancellationToken::new();
     let handle = WatcherHandle {
-        project_id: project_id.clone(),
         file_monitor,
         cancellation_token: cancellation_token.clone(),
     };
@@ -114,4 +108,19 @@ pub fn watch_in_background(
     });
 
     Ok(handle)
+}
+
+fn active_linked_worktrees(
+    project_id: ProjectHandleOrLegacyProjectId,
+) -> Result<Vec<LinkedWorktree>> {
+    let ctx: Context = project_id.try_into()?;
+    Ok(ctx
+        .worktrees_with_state()?
+        .into_iter()
+        .filter(|worktree| !worktree.archived)
+        .map(|worktree| LinkedWorktree {
+            name: worktree.name,
+            workdir: worktree.path,
+        })
+        .collect())
 }

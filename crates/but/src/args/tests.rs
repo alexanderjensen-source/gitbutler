@@ -1,10 +1,7 @@
 use super::*;
 
-#[cfg(feature = "legacy")]
 mod amend;
-#[cfg(feature = "legacy")]
 mod diff;
-#[cfg(feature = "legacy")]
 mod reword;
 
 mod find_subcommand {
@@ -414,7 +411,6 @@ fn mcp_command_is_hidden_but_still_parses() {
     );
 }
 
-#[cfg(feature = "legacy")]
 #[test]
 fn status_short_is_hidden_noop_compatibility_flag() {
     use clap::Parser;
@@ -442,7 +438,6 @@ fn status_short_is_hidden_noop_compatibility_flag() {
     }
 }
 
-#[cfg(feature = "legacy")]
 #[test]
 fn status_short_is_not_shown_in_help() {
     use clap::CommandFactory;
@@ -456,26 +451,6 @@ fn status_short_is_not_shown_in_help() {
     assert!(
         !help.contains("--short"),
         "compatibility-only flag should stay hidden from status help"
-    );
-}
-
-#[cfg(feature = "legacy")]
-#[test]
-fn diff_help_explains_single_target() {
-    use clap::CommandFactory;
-
-    let mut command = Args::command();
-    let diff = command.find_subcommand_mut("diff").expect("diff command");
-    let help = diff.render_long_help().to_string();
-    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    assert!(
-        help.contains("TARGET accepts at most one entity"),
-        "diff help should state that only one target is accepted"
-    );
-    assert!(
-        help.contains("run this command once per entity"),
-        "diff help should explain how to inspect several targets"
     );
 }
 
@@ -569,9 +544,7 @@ mod config_feature {
 
     use crate::args::{
         Args, Subcommands,
-        config::{
-            FeatureFlag, FeatureStatus, Platform as ConfigPlatform, Subcommands as ConfigCmd,
-        },
+        config::{Platform as ConfigPlatform, Subcommands as ConfigCmd},
     };
 
     #[test]
@@ -590,19 +563,15 @@ mod config_feature {
     }
 
     #[test]
-    fn parses_feature_update() {
-        let args = Args::try_parse_from(["but", "config", "feature", "single-branch", "enable"])
-            .expect("parse feature update");
+    fn rejects_removed_single_branch_flag() {
+        let err = Args::try_parse_from(["but", "config", "feature", "single-branch", "enable"])
+            .expect_err("single-branch mode no longer has a feature flag");
 
-        assert!(matches!(
-            args.cmd,
-            Some(Subcommands::Config(ConfigPlatform {
-                cmd: Some(ConfigCmd::Feature {
-                    flag: Some(FeatureFlag::SingleBranch),
-                    status: Some(FeatureStatus::Enable),
-                }),
-            }))
-        ));
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::InvalidValue,
+            "removed feature flags should not be accepted"
+        );
     }
 
     #[test]
@@ -611,11 +580,6 @@ mod config_feature {
             .expect_err("feature status without flag is invalid");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
-    }
-
-    #[test]
-    fn json_keys_use_snake_case() {
-        assert_eq!(FeatureFlag::SingleBranch.as_json_key(), "single_branch");
     }
 }
 
@@ -689,11 +653,9 @@ mod agentlog {
     }
 }
 
-#[cfg(feature = "legacy")]
 mod push {
     use clap::Parser;
 
-    #[cfg(feature = "legacy")]
     mod get_gerrit_flags {
         use crate::{args::push::Command as Args, command::legacy::push::get_gerrit_flags};
 
@@ -1055,7 +1017,6 @@ mod push {
     }
 }
 
-#[cfg(feature = "legacy")]
 mod pr {
     use clap::Parser;
 

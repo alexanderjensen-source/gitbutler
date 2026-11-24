@@ -3,7 +3,6 @@ use snapbox::IntoData;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use but_graph::Graph;
 use but_rebase::graph_rebase::{Editor, mutate};
 use but_testsupport::{git_status, graph_tree, visualize_commit_graph_all};
 use gix::prelude::ObjectIdExt;
@@ -26,7 +25,7 @@ fn disconnect_and_remove_middle_commit_in_linear_history() -> Result<()> {
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -61,7 +60,7 @@ fn disconnect_and_remove_middle_commit_in_linear_history() -> Result<()> {
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:main[🌳]
+└── 👉►[0]:main[🌳]
     ├── ·b4fd8ee (⌂)
     ├── ·d591dfe (⌂)
     └── 🏁·35b8235 (⌂)
@@ -101,7 +100,7 @@ fn disconnect_and_remove_two_middle_commits_in_linear_history() -> Result<()> {
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -141,7 +140,7 @@ fn disconnect_and_remove_two_middle_commits_in_linear_history() -> Result<()> {
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:main[🌳]
+└── 👉►[0]:main[🌳]
     ├── ·19f8134 (⌂)
     └── 🏁·35b8235 (⌂)
 
@@ -183,7 +182,7 @@ fn disconnect_and_remove_commit_in_merge_history_rewires_children() -> Result<()
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -218,15 +217,15 @@ fn disconnect_and_remove_commit_in_merge_history_rewires_children() -> Result<()
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-inner-merge[🌳]
+└── 👉►[0]:with-inner-merge[🌳]
     └── ·4023659 (⌂)
-        └── ►:1[1]:anon:
+        └── ►[1]:anon:
             └── ·01c4df0 (⌂)
-                ├── ►:2[3]:anon:
+                ├── ►[3]:anon:
                 │   └── 🏁·8f0d338 (⌂) ►A, ►main, ►tags/base
-                └── ►:3[2]:B
+                └── ►[2]:B
                     └── ·984fd1c (⌂)
-                        └── →:2:
+                        └── → segment ·8f0d338
 
 "#]]
     );
@@ -256,6 +255,56 @@ fn disconnect_and_remove_commit_in_merge_history_rewires_children() -> Result<()
 }
 
 #[test]
+fn disconnect_and_remove_second_parent_of_merge_keeps_parent_order() -> Result<()> {
+    let (repo, _tmpdir, mut meta, mut db) = fixture_writable("merge-in-the-middle")?;
+
+    let a = repo.rev_parse_single("A")?.detach();
+    let b = repo.rev_parse_single("B")?.detach();
+    let base = repo.rev_parse_single("base")?.detach();
+    // Without its branch, `b` is a direct parent of the merge rather than of a reference.
+    repo.find_reference("refs/heads/B")?.delete()?;
+
+    let graph = but_testsupport::graph_from_head(
+        &repo,
+        &*meta,
+        but_core::ref_metadata::ProjectMeta::default(),
+        &mut db,
+        standard_options(),
+    )?
+    .validated()?;
+    let mut ws = graph.into_workspace()?;
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo, &mut db)?;
+
+    let b_selector = editor
+        .select_commit(b)
+        .context("Failed to find commit b in editor graph")?;
+
+    editor.disconnect_segment_from(
+        mutate::SegmentDelimiter {
+            child: b_selector,
+            parent: b_selector,
+        },
+        mutate::SelectorSet::All,
+        mutate::SelectorSet::All,
+        false,
+    )?;
+    editor.replace_with_none(b_selector)?;
+    editor.rebase()?.materialize(Default::default())?;
+
+    let merge = repo
+        .rev_parse_single("with-inner-merge~1")?
+        .object()?
+        .into_commit();
+    assert_eq!(
+        merge.parent_ids().map(|id| id.detach()).collect::<Vec<_>>(),
+        [a, base],
+        "the bypass edge takes the slot of the removed second parent"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn disconnect_and_remove_merge_with_two_parents_and_two_children() -> Result<()> {
     let (repo, _tmpdir, mut meta, mut db) = fixture_writable("merge-with-two-children")?;
 
@@ -279,7 +328,7 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children() -> Result<()>
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -314,21 +363,21 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children() -> Result<()>
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·87269f1 (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·3e50be4 (⌂)
-        │       ├── ►:3[2]:anon:
+        │       ├── ►[2]:anon:
         │       │   └── ·bc0e772 (⌂) ►M, ►P1
-        │       │       └── ►:5[3]:main
+        │       │       └── ►[3]:main
         │       │           └── 🏁·7674a5e (⌂) ►tags/base
-        │       └── ►:4[2]:P2
+        │       └── ►[2]:P2
         │           └── ·392a8f8 (⌂)
-        │               └── →:5: (main)
-        └── ►:2[1]:C2
+        │               └── → segment main
+        └── ►[1]:C2
             └── ·c291781 (⌂)
-                ├── →:3:
-                └── →:4: (P2)
+                ├── → segment ·bc0e772
+                └── → segment P2
 
 "#]]
     );
@@ -414,7 +463,7 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children_from_one_side()
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -460,21 +509,21 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children_from_one_side()
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·9de031b (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·54d0b0d (⌂)
-        │       └── ►:3[2]:P1
+        │       └── ►[2]:P1
         │           └── ·bc0e772 (⌂)
-        │               └── ►:5[4]:main
+        │               └── ►[4]:main
         │                   └── 🏁·7674a5e (⌂) ►tags/base
-        └── ►:2[1]:C2
+        └── ►[1]:C2
             └── ·41cb528 (⌂)
-                └── ►:4[2]:M
+                └── ►[2]:M
                     └── ·9f6b11a (⌂)
-                        └── ►:6[3]:P2
+                        └── ►[3]:P2
                             └── ·392a8f8 (⌂)
-                                └── →:5: (main)
+                                └── → segment main
 
 "#]]
     );
@@ -556,7 +605,7 @@ fn disconnect_remove_merge_with_two_parents_and_two_children_children_only() -> 
     );
     snapbox::assert_data_eq!(git_status(&repo)?, snapbox::str![""]);
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -598,19 +647,19 @@ fn disconnect_remove_merge_with_two_parents_and_two_children_children_only() -> 
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·b87b6c9 (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·76ecfed (⌂)
-        │       └── ►:3[2]:M
+        │       └── ►[2]:M
         │           └── ·9f6b11a (⌂)
-        │               └── ►:4[3]:P2
+        │               └── ►[3]:P2
         │                   └── ·392a8f8 (⌂)
-        │                       └── ►:5[4]:main
+        │                       └── ►[4]:main
         │                           └── 🏁·7674a5e (⌂) ►tags/base
-        └── ►:2[1]:C2
+        └── ►[1]:C2
             └── ·41cb528 (⌂)
-                └── →:3: (M)
+                └── → segment M
 
 "#]]
     );
@@ -700,7 +749,7 @@ fn disconnect_fails_when_parents_to_disconnect_is_none() -> Result<()> {
 
     let before = visualize_commit_graph_all(&repo)?;
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -749,22 +798,22 @@ fn disconnect_fails_when_parents_to_disconnect_is_none() -> Result<()> {
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·d1cc4c7 (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·f94f259 (⌂)
-        │       └── ►:3[2]:M
+        │       └── ►[2]:M
         │           └── ·c5d1178 (⌂)
-        │               ├── ►:4[3]:P1
+        │               ├── ►[3]:P1
         │               │   └── ·bc0e772 (⌂)
-        │               │       └── ►:6[4]:main
+        │               │       └── ►[4]:main
         │               │           └── 🏁·7674a5e (⌂) ►tags/base
-        │               └── ►:5[3]:P2
+        │               └── ►[3]:P2
         │                   └── ·392a8f8 (⌂)
-        │                       └── →:6: (main)
-        └── ►:2[1]:C2
+        │                       └── → segment main
+        └── ►[1]:C2
             └── ·ce6aca9 (⌂)
-                └── →:3: (M)
+                └── → segment M
 
 "#]]
     );
@@ -783,7 +832,7 @@ fn disconnect_fails_fast_if_parent_to_disconnect_is_not_direct_parent() -> Resul
 
     let before = visualize_commit_graph_all(&repo)?;
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -832,22 +881,22 @@ fn disconnect_fails_fast_if_parent_to_disconnect_is_not_direct_parent() -> Resul
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·d1cc4c7 (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·f94f259 (⌂)
-        │       └── ►:3[2]:M
+        │       └── ►[2]:M
         │           └── ·c5d1178 (⌂)
-        │               ├── ►:4[3]:P1
+        │               ├── ►[3]:P1
         │               │   └── ·bc0e772 (⌂)
-        │               │       └── ►:6[4]:main
+        │               │       └── ►[4]:main
         │               │           └── 🏁·7674a5e (⌂) ►tags/base
-        │               └── ►:5[3]:P2
+        │               └── ►[3]:P2
         │                   └── ·392a8f8 (⌂)
-        │                       └── →:6: (main)
-        └── ►:2[1]:C2
+        │                       └── → segment main
+        └── ►[1]:C2
             └── ·ce6aca9 (⌂)
-                └── →:3: (M)
+                └── → segment M
 
 "#]]
     );
@@ -866,7 +915,7 @@ fn disconnect_fails_fast_if_child_to_disconnect_is_not_direct_child() -> Result<
 
     let before = visualize_commit_graph_all(&repo)?;
 
-    let graph = Graph::from_head(
+    let graph = but_testsupport::graph_from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
@@ -915,22 +964,22 @@ fn disconnect_fails_fast_if_child_to_disconnect_is_not_direct_child() -> Result<
         &overlayed,
         snapbox::str![[r#"
 
-└── 👉►:0[0]:with-two-children[🌳]
+└── 👉►[0]:with-two-children[🌳]
     └── ·d1cc4c7 (⌂)
-        ├── ►:1[1]:C1
+        ├── ►[1]:C1
         │   └── ·f94f259 (⌂)
-        │       └── ►:3[2]:M
+        │       └── ►[2]:M
         │           └── ·c5d1178 (⌂)
-        │               ├── ►:4[3]:P1
+        │               ├── ►[3]:P1
         │               │   └── ·bc0e772 (⌂)
-        │               │       └── ►:6[4]:main
+        │               │       └── ►[4]:main
         │               │           └── 🏁·7674a5e (⌂) ►tags/base
-        │               └── ►:5[3]:P2
+        │               └── ►[3]:P2
         │                   └── ·392a8f8 (⌂)
-        │                       └── →:6: (main)
-        └── ►:2[1]:C2
+        │                       └── → segment main
+        └── ►[1]:C2
             └── ·ce6aca9 (⌂)
-                └── →:3: (M)
+                └── → segment M
 
 "#]]
     );

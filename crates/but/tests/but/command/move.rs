@@ -2,14 +2,14 @@ use snapbox::IntoData as _;
 
 use crate::{
     command::util::{
-        branch_commit_cli_ids, commit_two_files_as_two_hunks_each, enable_worktree_manipulation,
+        branch_commit_cli_ids, commit_two_files_as_two_hunks_each,
         status_json_with_files as status_json,
     },
     utils::{CommandExt as _, Sandbox},
 };
 
 #[test]
-fn failed_implicit_move_checkout_restores_source_history() {
+fn implicit_move_onto_a_conflicted_tip_checks_out_its_padding_commit() {
     let env = Sandbox::open_with_default_settings("single-branch-mode");
     env.file("file", "x\n");
     env.but("commit -b source -m base").assert().success();
@@ -55,20 +55,23 @@ Hint: run `but help` for all commands
     );
     env.but("move suw --above source -b moved")
         .assert()
-        .failure()
-        .stderr_eq(snapbox::str![[r#"
-Error: Cannot check out a conflicted commit.
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+Moved suw to new branch 'moved' above branch 'source'
 
-Hint: Run `but switch --workspace` and start conflict resolution with `but resolve`
+⚠ This operation left a commit conflicted:
+  ● suw [conflict] first
+Resolve with but resolve, or back out with but undo.
 
 "#]]);
-    // A failed checkout must restore the original source refs and leave no destination branch.
+    // The moved commit conflicts on top of `last`, so the checked out `moved` rests on a padding commit over it.
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-* baa8b36 (HEAD -> source) last
-* 5f3b211 revert
-* 10fc7e8 first
+* e80083a (HEAD -> moved) GitButler Padding Commit
+* cf2bcd3 [conflict] first
+* ae5714b (source) last
+* e5528a4 revert
 * 491196b base
 * b1540e5 (origin/main, origin/HEAD, main, gitbutler/target) M
 * e31e6ca add init
@@ -81,13 +84,13 @@ Hint: Run `but switch --workspace` and start conflict resolution with `but resol
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ so [source] [HEAD]
+┊╭┄ mo [moved] [HEAD]
+┊●   suw first (no changes) {conflicted}
+┊│
+┊├┄ so [source]
 ┊●   nlu last
 ┊│     nlu:q M file
-┊●   uwm revert
-┊│     uwm:q M file
-┊●   suw first
-┊│     suw:q M file
+┊●   uwm revert (no changes)
 ┊●   vml base
 ┊│     vml:q A file
 ├╯
@@ -100,7 +103,7 @@ Hint: run `but help` for all commands
 }
 
 #[test]
-fn failed_implicit_branch_move_checkout_restores_source_history() {
+fn implicit_branch_move_onto_a_conflicted_tip_checks_out_its_padding_commit() {
     let env = Sandbox::open_with_default_settings("single-branch-mode");
     env.file("file", "x\n");
     env.but("commit -b source -m base").assert().success();
@@ -154,20 +157,23 @@ Hint: run `but help` for all commands
     );
     env.but("move first --above top")
         .assert()
-        .failure()
-        .stderr_eq(snapbox::str![[r#"
-Error: Cannot check out a conflicted commit.
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+Stacked branch 'first' on top of branch 'top'
 
-Hint: Run `but switch --workspace` and start conflict resolution with `but resolve`
+⚠ This operation left a commit conflicted:
+  ● suw [conflict] first
+Resolve with but resolve, or back out with but undo.
 
 "#]]);
-    // Restacking existing branches must also roll back every rewritten ref and branch order.
+    // `first` conflicts on top of `top` and is checked out, so it rests on a padding commit over it.
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-* baa8b36 (HEAD -> top) last
-* 5f3b211 revert
-* 10fc7e8 (first) first
+* e80083a (HEAD -> first) GitButler Padding Commit
+* cf2bcd3 [conflict] first
+* ae5714b (top) last
+* e5528a4 revert
 * 491196b (source) base
 * b1540e5 (origin/main, origin/HEAD, main, gitbutler/target) M
 * e31e6ca add init
@@ -180,15 +186,13 @@ Hint: Run `but switch --workspace` and start conflict resolution with `but resol
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ to [top] [HEAD]
+┊╭┄ fi [first] [HEAD]
+┊●   suw first (no changes) {conflicted}
+┊│
+┊├┄ to [top]
 ┊●   nlu last
 ┊│     nlu:q M file
-┊●   uwm revert
-┊│     uwm:q M file
-┊│
-┊├┄ fi [first]
-┊●   suw first
-┊│     suw:q M file
+┊●   uwm revert (no changes)
 ┊│
 ┊├┄ so [source]
 ┊●   vml base
@@ -233,7 +237,7 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   b6449da (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   287504d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
 | * a3830b6 (C) add C
 | * 549c6bf (B, A) add A
@@ -261,6 +265,10 @@ fn single_branch_move_commit_above_checkout() {
 ┊│
 ┊├┄ g0 [C]
 ┊●   vuw add C
+┊│
+┊├┄ h0 [B] (no commits)
+┊│
+┊├┄ i0 [A]
 ┊●   nmq add A
 ├╯
 ┊
@@ -470,7 +478,7 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   2d18278 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   d5604e8 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
 | * c753d5e (C) add C
 | * ff3d67f (B) add B
@@ -494,13 +502,15 @@ fn single_branch_move_above_lower_branch_preserves_checkout() {
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [C] [HEAD]
+┊╭┄ g0 [C] [HEAD] (no commits)
+┊│
+┊├┄ h0 [B]
 ┊●   myy add B
 ┊│
 ┊├┄ mo [moved]
 ┊●   vuw add C
 ┊│
-┊├┄ h0 [A]
+┊├┄ i0 [A]
 ┊●   nmq add A
 ├╯
 ┊
@@ -591,11 +601,11 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   3f3b2ac (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   8024758 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
-| * a3830b6 (C) add C
-| * 549c6bf (A) add A
-* | e76feb9 (B) add B
+| * e76feb9 (B) add B
+* | a3830b6 (C) add C
+* | 549c6bf (A) add A
 |/  
 * 3712f84 (origin/main, origin/HEAD, main, gitbutler/target) add M
 * e31e6ca add init
@@ -817,9 +827,9 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   e1a91a3 (gitbutler/workspace) GitButler Workspace Commit
+*   372e55d (gitbutler/workspace) GitButler Workspace Commit
 |/  
-| * 9477ae7 (A) add A
+* | 9477ae7 (A) add A
 |/  
 | * d3e2ba3 (HEAD -> moved) add B
 |/  
@@ -889,6 +899,48 @@ Hint: run `but help` for all commands
 * e06c9f0 (B) add B
 * 549c6bf (A) add A
 | * eea8652 (HEAD -> C) add C
+|/  
+* 3712f84 (origin/main, origin/HEAD, main, gitbutler/target) add M
+* e31e6ca add init
+
+"#]]
+    );
+}
+
+#[test]
+fn single_branch_unstack_checked_out_branch_enters_workspace() {
+    let env = Sandbox::open_with_default_settings("single-branch-three-dependent-branches");
+    env.but("move C --unstack").assert().success();
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [B]
+┊●   myy add B
+┊│
+┊├┄ h0 [A]
+┊●   nmq add A
+├╯
+┊
+┊╭┄ i0 [C]
+┊●   vuw add C
+├╯
+┊
+┴ 3712f84 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        snapbox::str![[r#"
+*   4d632ff (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+|/  
+| * eea8652 (C) add C
+* | e06c9f0 (B) add B
+* | 549c6bf (A) add A
 |/  
 * 3712f84 (origin/main, origin/HEAD, main, gitbutler/target) add M
 * e31e6ca add init
@@ -1043,24 +1095,6 @@ Hint: run `but help` for all commands
 6 ┊ 6 │  six
 7 ┊ 7 │  seven
   ┊ 8 │ +end
-
-"#]]);
-}
-
-#[test]
-fn move_switch_requires_single_branch_feature() {
-    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
-    env.setup_metadata(&["A", "B"]);
-    env.but("config feature single-branch disable")
-        .assert()
-        .success();
-    env.but("move d3e2ba3 -b moved --switch")
-        .assert()
-        .failure()
-        .stderr_eq(snapbox::str![[r#"
-Error: `--switch` requires the `single-branch` feature to be enabled
-
-Hint: Enable the feature with `but config feature single-branch enable`
 
 "#]]);
 }
@@ -1227,7 +1261,7 @@ Moved zll above commit ywx
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   zll add first
 ┊●   ywx add second
 ├╯
@@ -1275,7 +1309,7 @@ Moved ywx below commit zll
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   zll add first
 ┊●   ywx add second
 ├╯
@@ -1337,7 +1371,7 @@ Moved vvl, mzz [..] commit [..]
             .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   usn add A13
 ┊●   opy add A12
 ┊●   opk add A11
@@ -1418,7 +1452,7 @@ Moved tpw, zpl, pyq [..] commit [..]
             .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   usn add A13
 ┊●   opy add A12
 ┊●   opk add A11
@@ -1480,7 +1514,7 @@ Moved zll to new branch 'a-branch-1' above branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ br [a-branch-1]
+┊╭┄ br [a-branch-1] [HEAD]
 ┊●   zll add first
 ┊│
 ┊├┄ g0 [A]
@@ -1530,7 +1564,7 @@ Moved ywx to new branch 'a-branch-1' above branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ br [a-branch-1]
+┊╭┄ br [a-branch-1] [HEAD]
 ┊●   ywx add second
 ┊│
 ┊├┄ g0 [A]
@@ -1580,7 +1614,7 @@ Moved ywx to new branch 'a-branch-1' below branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   zll add first
 ┊│
 ┊├┄ br [a-branch-1]
@@ -1630,7 +1664,7 @@ Moved zll to new branch 'a-branch-1' below branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊●   ywx add second
 ┊│
 ┊├┄ br [a-branch-1]
@@ -1680,7 +1714,7 @@ Moved ywx, zll to new branch 'a-branch-1' above branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ br [a-branch-1]
+┊╭┄ br [a-branch-1] [HEAD]
 ┊●   ywx add second
 ┊●   zll add first
 ┊│
@@ -1730,7 +1764,7 @@ Moved ywx, zll to new branch 'a-branch-1' below branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A] (no commits)
+┊╭┄ g0 [A] [HEAD] (no commits)
 ┊│
 ┊├┄ br [a-branch-1]
 ┊●   ywx add second
@@ -2894,7 +2928,7 @@ Stacked branch 'B' on top of branch 'C'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [B]
+┊╭┄ g0 [B] [HEAD]
 ┊●   wwm add B
 ┊│
 ┊├┄ h0 [C]
@@ -3011,7 +3045,7 @@ Stacked branch 'B' on top of branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [B]
+┊╭┄ g0 [B] [HEAD]
 ┊●   lrm add B
 ┊│
 ┊├┄ h0 [A]
@@ -3063,7 +3097,7 @@ Stacked branch 'B' on top of branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [B] (no commits)
+┊╭┄ g0 [B] [HEAD] (no commits)
 ┊│
 ┊├┄ h0 [A]
 ┊●   tpm add A
@@ -3206,7 +3240,7 @@ fn move_empty_branch_above_tip_then_switching_to_workspace() {
 Hint: run `but help` for all commands
 
 "#]];
-    assert_status(&env, expected.clone());
+    assert_status(&env, expected);
 
     env.but("switch --workspace").assert().success();
     assert_head(&env, "gitbutler/workspace");
@@ -3259,7 +3293,7 @@ fn move_empty_branch_below_tip_then_switching_to_workspace() {
 Hint: run `but help` for all commands
 
 "#]];
-    assert_status(&env, expected.clone());
+    assert_status(&env, expected);
 
     env.but("switch --workspace").assert().success();
     assert_head(&env, "gitbutler/workspace");
@@ -3887,7 +3921,7 @@ fn unstack_empty_branch() {
     env.setup_metadata(&[]);
 
     env.but("branch new bottom").assert().success();
-    env.but("branch new -a bottom top").assert().success();
+    env.but("branch new -A bottom top").assert().success();
 
     env.but("status")
         .assert()
@@ -3993,6 +4027,82 @@ Unstacked branch 'A'
 Hint: run `but help` for all commands
 
 "#]]);
+}
+
+#[test]
+fn unstack_branch_with_worktree_branch_at_common_base() {
+    let env =
+        Sandbox::init_scenario_with_target_and_default_settings("one-stack-two-dependent-branches");
+    env.setup_metadata(&["A", "B"]);
+    env.but("worktree new wt").assert().success();
+
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [B]
+┊●   wwm add B
+┊│
+┊├┄ h0 [A]
+┊●   tpm add A
+├╯
+┊
+┊╭┄ wt:@ [uncommitted] {wt} (no changes)
+┊├┄ wt [wt] (no commits)
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+
+    env.but("move B --unstack")
+        .assert()
+        .success()
+        .stderr_eq(snapbox::str![])
+        .stdout_eq(snapbox::str![[r#"
+Unstacked branch 'B'
+
+"#]]);
+
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [A]
+┊●   tpm add A
+├╯
+┊
+┊╭┄ h0 [B]
+┊●   wwm add B
+├╯
+┊
+┊╭┄ wt:@ [uncommitted] {wt} (no changes)
+┊├┄ wt [wt] (no commits)
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        snapbox::str![[r#"
+*   e2a1cc0 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+|/  
+| * 05d3df1 (B) add B
+* | 9477ae7 (A) add A
+|/  
+* 0dc3733 (origin/main, origin/HEAD, wt, main, gitbutler/target) add M
+
+"#]]
+    );
 }
 
 #[test]
@@ -4257,6 +4367,8 @@ Hint: run `but help` for all commands
         .failure()
         .stderr_eq(snapbox::str![[r#"
 Error: A branch named 'B' exists but is not applied
+
+Hint: Pick another name, or run `but apply B` if you meant that branch
 
 "#]]);
 }
@@ -4687,7 +4799,7 @@ Stacked branch 'B' on top of branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [B]
+┊╭┄ g0 [B] [HEAD]
 ┊●   lrm add B
 ┊│     lrm:p A B
 ┊│
@@ -4743,7 +4855,6 @@ Hint: `--branch` can only move branches onto existing branches
 fn move_a_commit_out_of_a_linked_worktree() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    super::util::enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = super::util::add_worktree_with_commit(&env, "wt-feature", "A");
 
@@ -4774,11 +4885,11 @@ Moved nsn to the tip of branch 'B'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   7ca2b42 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   bfc5668 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
-| * 9477ae7 (wt-feature, A) add A
-* | f379d52 (B) add W
-* | d3e2ba3 add B
+| * f379d52 (B) add W
+| * d3e2ba3 add B
+* | 9477ae7 (wt-feature, A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -4792,11 +4903,11 @@ Moved nsn to the tip of branch 'B'
     snapbox::assert_data_eq!(
         but_testsupport::visualize_commit_graph_all_from_dir(&wt_dir).unwrap(),
         snapbox::str![[r#"
-*   7ca2b42 (gitbutler/workspace) GitButler Workspace Commit
+*   bfc5668 (gitbutler/workspace) GitButler Workspace Commit
 |/  
-| * 9477ae7 (HEAD -> wt-feature, A) add A
-* | f379d52 (B) add W
-* | d3e2ba3 add B
+| * f379d52 (B) add W
+| * d3e2ba3 add B
+* | 9477ae7 (HEAD -> wt-feature, A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -4810,7 +4921,6 @@ Moved nsn to the tip of branch 'B'
 #[test]
 fn move_a_worktree_commit_onto_the_branch_worktrees_fork_from() {
     let env = Sandbox::open_with_default_settings("single-branch-mode");
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt = env.app_data_dir().join("worktrees");
     but_testsupport::invoke_bash_at_dir(
@@ -4863,15 +4973,60 @@ Moved zqt to the tip of branch 'feature'
     );
 }
 
+#[test]
+fn move_onto_a_worktree_branch_marks_its_conflicting_uncommitted_changes() {
+    let env = Sandbox::open_with_default_settings("single-branch-mode");
+    env.but("status").assert().success();
+    let wt = env.app_data_dir().join("worktrees").join("wt-dirty");
+    but_testsupport::invoke_bash_at_dir(
+        &format!(
+            r#"
+        git checkout -q -b feature
+        echo feature >init && git commit -q -am "change init"
+        git worktree add -q -b wt-dirty "{wt}" main
+        echo dirty >"{wt}/init"
+        "#,
+            wt = wt.display()
+        ),
+        env.projects_root(),
+    );
+
+    env.but(format!(
+        "move {} -b wt-dirty",
+        env.invoke_git("rev-parse feature")
+    ))
+    .assert()
+    .success()
+    .stdout_eq(snapbox::str![[r#"
+Moved yxq to the tip of branch 'wt-dirty'
+
+⚠ A conflict occurred during checkout of worktree 'wt-dirty' at [..]wt-dirty. Run `but status` there for more information.
+
+"#]])
+    .stderr_eq(snapbox::str![]);
+
+    // The worktree's change survives as our side of the conflict with the moved commit.
+    snapbox::assert_data_eq!(
+        std::fs::read_to_string(wt.join("init")).unwrap(),
+        snapbox::str![[r#"
+<<<<<<< ours
+dirty
+=======
+feature
+>>>>>>> theirs
+
+"#]]
+    );
+}
+
 /// `--below` a worktree heading moves the commit to the tip of the branch that worktree has
 /// checked out, taking it out of the workspace.
 #[test]
 fn move_commit_below_a_worktree() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    crate::command::util::enable_worktree_manipulation(&env);
-    // The first read with the flag on archives every worktree already on disk, so the one
-    // under test has to be created after it.
+    // The first read archives every worktree already on disk, so the one under test has to
+    // be created after it.
     env.but("status").assert().success();
     crate::command::util::add_worktree_with_commit(&env, "wt-inside", "A");
 
@@ -4888,12 +5043,13 @@ Moved lrm to the tip of branch 'wt-inside'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   e1a91a3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   372e55d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | | * 4ce1279 (wt-inside) add B
 | | * 580bef0 add W
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target, B) add M
 
@@ -4907,7 +5063,6 @@ Moved lrm to the tip of branch 'wt-inside'
 fn move_commit_above_a_worktree_is_refused() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    crate::command::util::enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     crate::command::util::add_worktree_with_commit(&env, "wt-inside", "A");
 
@@ -4931,7 +5086,6 @@ Hint: Use `--below` to target the tip of the worktree's branch
 fn move_a_commit_to_a_worktrees_branch_by_name() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    crate::command::util::enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     crate::command::util::add_worktree_with_commit(&env, "wt-inside", "A");
 
@@ -4948,12 +5102,13 @@ Moved lrm to the tip of branch 'wt-inside'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   e1a91a3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   372e55d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | | * 4ce1279 (wt-inside) add B
 | | * 580bef0 add W
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target, B) add M
 
@@ -4968,7 +5123,6 @@ Moved lrm to the tip of branch 'wt-inside'
 fn move_a_branch_onto_a_worktrees_checked_out_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    crate::command::util::enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = crate::command::util::add_worktree_with_commit(&env, "wt-inside", "A");
 
@@ -4985,7 +5139,7 @@ Stacked branch 'B' on top of branch 'wt-inside'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊┊
 ┊┊╭┄ h0:@ [uncommitted] {wt-inside} (no changes)
 ┊┊├┄ h0 [B]
@@ -5007,8 +5161,6 @@ Hint: run `but help` for all commands
         snapbox::str![[r#"
 * 4ce1279 (HEAD -> B) add B
 * 580bef0 (wt-inside) add W
-| * b66c23e (gitbutler/workspace) GitButler Workspace Commit
-|/  
 * 9477ae7 (A) add A
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -5018,6 +5170,133 @@ Hint: run `but help` for all commands
     assert!(
         wt_dir.join("B").exists(),
         "the moved branch's file reached the worktree's checkout"
+    );
+}
+
+#[test]
+fn moving_one_of_two_stacks_onto_a_worktrees_branch_checks_out_the_other() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+    env.but("status").assert().success();
+    crate::command::util::add_worktree_with_commit(&env, "wt-inside", "main");
+
+    env.but("move A --above wt-inside").assert().success();
+    assert_eq!(
+        env.invoke_git("symbolic-ref --short HEAD"),
+        "B",
+        "a move leaving one stack checks that stack out"
+    );
+    assert!(
+        env.open_repo()
+            .try_find_reference(but_core::WORKSPACE_REF_NAME)
+            .unwrap()
+            .is_none(),
+        "the unnecessary managed workspace reference should be removed"
+    );
+}
+
+#[test]
+fn moving_the_only_stack_onto_a_worktrees_branch_leaves_the_workspace() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
+    env.setup_metadata(&["A"]);
+    env.but("status").assert().success();
+    crate::command::util::add_worktree_with_commit(&env, "wt-inside", "main");
+
+    env.but("move A --above wt-inside").assert().success();
+    assert_eq!(
+        env.invoke_git("symbolic-ref --short HEAD"),
+        "main",
+        "with no stacks left in the main checkout, the workspace has no purpose"
+    );
+    assert!(
+        env.open_repo()
+            .try_find_reference(but_core::WORKSPACE_REF_NAME)
+            .unwrap()
+            .is_none(),
+        "the empty managed workspace reference should be removed"
+    );
+}
+
+/// A branch below a worktree's checkout that tracks the target is still the worktree's own branch,
+/// so the worktree is left on it when its checked-out branch moves out.
+#[test]
+fn move_a_worktrees_checked_out_branch_off_a_branch_tracking_the_target() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+    env.but("status").assert().success();
+    let wt_dir = crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "main");
+    env.invoke_git("branch --set-upstream-to origin/main wt-lower");
+
+    env.but("move wt-inside -b B").assert().success();
+    snapbox::assert_data_eq!(
+        but_testsupport::visualize_commit_graph_all_from_dir(&wt_dir).unwrap(),
+        snapbox::str![[r#"
+*   6507a15 (gitbutler/workspace) GitButler Workspace Commit
+|/  
+| * c019586 (wt-inside) add W2
+| * d3e2ba3 (B) add B
+* | 9477ae7 (A) add A
+|/  
+| * a483238 (HEAD -> wt-lower) add W
+|/  
+* 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
+
+"#]]
+    );
+}
+
+/// An empty branch ordered below a worktree's checkout stays the worktree's branch even when it
+/// tracks the target and points at it, so the worktree is left on it.
+#[test]
+fn move_a_worktrees_checked_out_branch_off_an_empty_branch_tracking_the_target() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+    env.but("status").assert().success();
+    let wt_dir = crate::command::util::add_worktree_with_commit(&env, "wt-inside", "main");
+    env.but("branch new wt-lower --below wt-inside")
+        .assert()
+        .success();
+    env.invoke_git("branch --set-upstream-to origin/main wt-lower");
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [A]
+┊●   tpm add A
+├╯
+┊
+┊╭┄ h0 [B]
+┊●   lrm add B
+├╯
+┊
+┊╭┄ wt:@ [uncommitted] {wt-inside} (no changes)
+┊├┄ wt [wt-inside]
+┊●   swk add W
+┊│
+┊├┄ lo [wt-lower] (no commits)
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+
+    env.but("move wt-inside -b B").assert().success();
+    snapbox::assert_data_eq!(
+        but_testsupport::visualize_commit_graph_all_from_dir(&wt_dir).unwrap(),
+        snapbox::str![[r#"
+*   b15e646 (gitbutler/workspace) GitButler Workspace Commit
+|/  
+| * 1038d1a (wt-inside) add W
+| * d3e2ba3 (B) add B
+* | 9477ae7 (A) add A
+|/  
+* 0dc3733 (HEAD -> wt-lower, origin/main, origin/HEAD, main, gitbutler/target) add M
+
+"#]]
     );
 }
 
@@ -5110,7 +5389,7 @@ Hint: run `but help` for all commands
         .assert()
         .failure()
         .stderr_eq(snapbox::str![[r#"
-Error: `-m/--message` can only be used when moving committed changes
+Error: `-m/--message` and `-F/--file` can only be used when moving committed changes
 
 "#]]);
 
@@ -5118,7 +5397,7 @@ Error: `-m/--message` can only be used when moving committed changes
         .assert()
         .failure()
         .stderr_eq(snapbox::str![[r#"
-Error: `-m/--message` can only be used when moving committed changes
+Error: `-m/--message` and `-F/--file` can only be used when moving committed changes
 
 "#]]);
 }
@@ -5159,7 +5438,7 @@ Moved ywx to new branch 'top' above branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ to [top]
+┊╭┄ to [top] [HEAD]
 ┊●   ywx add second
 ┊│
 ┊├┄ g0 [A]
@@ -5186,7 +5465,7 @@ Moved ywx to new branch 'bottom' below branch 'A'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ to [top] (no commits)
+┊╭┄ to [top] [HEAD] (no commits)
 ┊│
 ┊├┄ g0 [A]
 ┊●   zll add first
@@ -5448,7 +5727,6 @@ Error: Cannot use `-b/--branch` when moving relative to commits
 fn cannot_name_branches_when_moving_commits_relative_to_worktree() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack-two-commits");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
 
     env.but("wt new").assert().success();
 
@@ -5487,7 +5765,6 @@ Error: Cannot use `-b/--branch` when moving relative to worktrees
 fn move_a_commit_to_a_lower_worktree_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "A");
 
@@ -5501,13 +5778,14 @@ Moved lrm to the tip of branch 'wt-lower'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   e1a91a3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   372e55d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | | * 9f6b492 (wt-inside) add W2
 | | * 4ce1279 (wt-lower) add B
 | | * 580bef0 add W
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target, B) add M
 
@@ -5516,38 +5794,68 @@ Moved lrm to the tip of branch 'wt-lower'
     );
 }
 
-/// Below a lower worktree branch means a new branch there, which worktrees can't order yet.
+/// Below a lower worktree branch means a new branch there, ordered within the worktree's lane.
 #[test]
-fn move_commit_below_a_lower_worktree_branch_is_refused() {
+fn move_commit_below_a_lower_worktree_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "A");
 
     env.but("move lrm --below wt-lower")
         .assert()
-        .stderr_eq(snapbox::str![[r#"
-Error: Cannot place 'a-branch-1' relative to worktree branch 'wt-lower': branches can't be ordered in worktrees yet
+        .success()
+        .stderr_eq(snapbox::str![])
+        .stdout_eq(snapbox::str![[r#"
+Moved lrm to new branch 'a-branch-1' below branch 'wt-lower'
 
-"#]])
-        .stdout_eq(snapbox::str![""]);
+"#]]);
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   c128bce (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   372e55d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
-* | d3e2ba3 (B) add B
-| | * 3b0b265 (wt-inside) add W2
-| | * 580bef0 (wt-lower) add W
+| | * d4f76d7 (wt-inside) add W2
+| | * 60eaa7b (wt-lower) add W
+| | * e776549 (a-branch-1) add B
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
-* 0dc3733 (origin/main, origin/HEAD, main) add M
+* 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target, B) add M
 
 "#]]
         .raw()
     );
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [A]
+┊┊
+┊┊╭┄ wt:@ [uncommitted] {wt-inside} (no changes)
+┊┊├┄ wt [wt-inside]
+┊┊●   ntk add W2
+┊┊│
+┊┊├┄ lo [wt-lower]
+┊┊●   nsn add W
+┊┊│
+┊┊├┄ br [a-branch-1]
+┊┊●   lrm add B
+┊├╯
+┊●   tpm add A
+├╯
+┊
+┊╭┄ h0 [B] (no commits)
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
 }
 
 /// A branch below a worktree's checkout is a stacking target like any workspace branch: the
@@ -5556,7 +5864,6 @@ Error: Cannot place 'a-branch-1' relative to worktree branch 'wt-lower': branche
 fn move_a_branch_onto_a_lower_worktree_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "A");
 
@@ -5570,12 +5877,10 @@ Stacked branch 'B' on top of branch 'wt-lower'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-* b66c23e (HEAD -> gitbutler/workspace) GitButler Workspace Commit
-| * 9f6b492 (wt-inside) add W2
-| * 4ce1279 (B) add B
-| * 580bef0 (wt-lower) add W
-|/  
-* 9477ae7 (A) add A
+* 9f6b492 (wt-inside) add W2
+* 4ce1279 (B) add B
+* 580bef0 (wt-lower) add W
+* 9477ae7 (HEAD -> A) add A
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
 "#]]
@@ -5587,7 +5892,7 @@ Stacked branch 'B' on top of branch 'wt-lower'
         .stdout_eq(snapbox::str![[r#"
 ╭┄ @ [uncommitted] (no changes)
 ┊
-┊╭┄ g0 [A]
+┊╭┄ g0 [A] [HEAD]
 ┊┊
 ┊┊╭┄ wt:@ [uncommitted] {wt-inside} (no changes)
 ┊┊├┄ wt [wt-inside]
@@ -5619,7 +5924,6 @@ Hint: run `but help` for all commands
 fn move_a_lower_worktree_branch_onto_a_workspace_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "A");
 
@@ -5633,13 +5937,14 @@ Stacked branch 'wt-lower' on top of branch 'B'
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   7ca2b42 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   bfc5668 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
-* | f379d52 (wt-lower) add W
-* | d3e2ba3 (B) add B
+| * f379d52 (wt-lower) add W
+| * d3e2ba3 (B) add B
 | | * 109d075 (wt-inside) add W2
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -5685,7 +5990,6 @@ Hint: run `but help` for all commands
 fn move_a_worktrees_checked_out_branch_onto_a_workspace_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = crate::command::util::add_worktree_with_lower_branch(&env, "wt-inside", "A");
 
@@ -5726,13 +6030,14 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         but_testsupport::visualize_commit_graph_all_from_dir(&wt_dir).unwrap(),
         snapbox::str![[r#"
-*   1974aca (gitbutler/workspace) GitButler Workspace Commit
+*   d31f03a (gitbutler/workspace) GitButler Workspace Commit
 |\  
-* | db0b242 (wt-inside) add W2
-* | d3e2ba3 (B) add B
+| * db0b242 (wt-inside) add W2
+| * d3e2ba3 (B) add B
 | | * 580bef0 (HEAD -> wt-lower) add W
 | |/  
-| * 9477ae7 (A) add A
+|/|   
+* | 9477ae7 (A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -5745,13 +6050,99 @@ Hint: run `but help` for all commands
     );
 }
 
+/// Without an order naming it, an empty branch at a worktree's base merely rests on the target:
+/// it is no branch of the worktree's or any stack's, so the worktree is left detached.
+#[test]
+fn move_a_worktrees_checked_out_branch_off_an_unordered_empty_branch_at_the_target() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+    env.but("status").assert().success();
+    let wt = env.app_data_dir().join("worktrees").join("wt-inside");
+    env.invoke_bash(format!(
+        r#"git worktree add -q -b wt-base "{wt}" main
+        cd "{wt}" && git checkout -q -b wt-inside && echo change >wt-file.txt && git add wt-file.txt && git commit -q -m "add W""#,
+        wt = wt.display()
+    ));
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [A]
+┊●   tpm add A
+├╯
+┊
+┊╭┄ h0 [B]
+┊●   lrm add B
+├╯
+┊
+┊╭┄ wt:@ [uncommitted] {wt-inside} (no changes)
+┊├┄ wt [wt-inside]
+┊●   swk add W
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+
+    env.but("move wt-inside -b B")
+        .assert()
+        .stderr_eq(snapbox::str![])
+        .stdout_eq(snapbox::str![[r#"
+Stacked branch 'wt-inside' on top of branch 'B'
+
+"#]]);
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [A]
+┊●   tpm add A
+├╯
+┊
+┊╭┄ wt [wt-inside]
+┊●   swk add W
+┊│
+┊├┄ h0 [B]
+┊●   lrm add B
+├╯
+┊
+┊╭┄ i0:@ [uncommitted] {wt-inside} (no changes)
+┊├┄ i0 (no commits)
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
+    snapbox::assert_data_eq!(
+        but_testsupport::visualize_commit_graph_all_from_dir(&wt).unwrap(),
+        snapbox::str![[r#"
+*   b15e646 (gitbutler/workspace) GitButler Workspace Commit
+|\  
+| * 1038d1a (wt-inside) add W
+| * d3e2ba3 (B) add B
+* | 9477ae7 (A) add A
+|/  
+* 0dc3733 (HEAD, origin/main, origin/HEAD, wt-base, main, gitbutler/target) add M
+
+"#]]
+        .raw()
+    );
+}
+
 /// With nothing below it in its worktree, the checked-out branch leaves the worktree detached
 /// on the commit it was based on.
 #[test]
 fn move_a_worktrees_only_branch_onto_a_workspace_branch() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
-    enable_worktree_manipulation(&env);
     env.but("status").assert().success();
     let wt_dir = crate::command::util::add_worktree_with_commit(&env, "wt-inside", "A");
 
@@ -5791,11 +6182,11 @@ Hint: run `but help` for all commands
     snapbox::assert_data_eq!(
         but_testsupport::visualize_commit_graph_all_from_dir(&wt_dir).unwrap(),
         snapbox::str![[r#"
-*   7ca2b42 (gitbutler/workspace) GitButler Workspace Commit
+*   bfc5668 (gitbutler/workspace) GitButler Workspace Commit
 |\  
-| * 9477ae7 (HEAD, A) add A
-* | f379d52 (wt-inside) add W
-* | d3e2ba3 (B) add B
+| * f379d52 (wt-inside) add W
+| * d3e2ba3 (B) add B
+* | 9477ae7 (HEAD, A) add A
 |/  
 * 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
 
@@ -6003,27 +6394,93 @@ Hint: run `but help` for all commands
 
 "#]]);
 
-    let head_before = env.invoke_git("rev-parse HEAD");
     let head_ref_before = env.invoke_git("symbolic-ref HEAD");
 
     env.but("discard oln")
         .assert()
-        .failure()
-        .stderr_eq(snapbox::str![[r#"
-Error: Cannot check out a conflicted commit.
-
-Hint: Run `but switch --workspace` and start conflict resolution with `but resolve`
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+Discarded commit oln
 
 "#]]);
 
     assert_eq!(
-        env.invoke_git("rev-parse HEAD"),
-        head_before,
-        "the rejected discard preserves the branch tip and its history"
-    );
-    assert_eq!(
         env.invoke_git("symbolic-ref HEAD"),
         head_ref_before,
-        "the rejected discard keeps the same branch checked out"
+        "the discard keeps the same branch checked out"
     );
+    // The conflicted `change file` is now the tip, so the branch rests on a padding commit over it.
+    snapbox::assert_data_eq!(
+        env.git_log(),
+        snapbox::str![[r#"
+* 29eafac (HEAD -> A) GitButler Padding Commit
+* 2cf78ad [conflict] change file
+| * ff4136d (gitbutler/workspace) GitButler Workspace Commit
+|/  
+* 0dc3733 (origin/main, origin/HEAD, main, gitbutler/target) add M
+
+"#]]
+    );
+}
+
+#[test]
+fn moving_changes_to_new_commit_with_message_from_stdin() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
+    env.setup_metadata(&["A"]);
+
+    env.but("move tpm:t --above tpm -F -")
+        .stdin("new commit\n\nfrom stdin\n")
+        .assert()
+        .success();
+
+    assert_eq!(
+        env.invoke_git("log -1 --format=[%B] refs/heads/A --"),
+        "[new commit\n\nfrom stdin]",
+        "the new commit takes the trimmed message read from stdin"
+    );
+}
+
+#[test]
+fn message_file_isnt_allowed_when_moving_commits() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+
+    // Like `-m`, `-F` only names a new commit, which moving a whole commit doesn't create.
+    env.but("move tpm --above g0 -F -")
+        .stdin("not allowed\n")
+        .assert()
+        .failure()
+        .stderr_eq(snapbox::str![[r#"
+Error: `-m/--message` and `-F/--file` can only be used when moving committed changes
+
+"#]]);
+}
+
+/// A branch merely resting on the target is no stack's branch, so rewriting the stacks above it
+/// leaves it out of them.
+#[test]
+fn move_a_branch_above_a_branch_resting_on_the_target() {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
+    env.setup_metadata(&["A", "B"]);
+    env.but("status").assert().success();
+    env.invoke_git("branch stray main");
+    env.but("move B -b A").assert().success();
+    env.but("status")
+        .assert()
+        .success()
+        .stdout_eq(snapbox::str![[r#"
+╭┄ @ [uncommitted] (no changes)
+┊
+┊╭┄ g0 [B] [HEAD]
+┊●   lrm add B
+┊│
+┊├┄ h0 [A]
+┊●   tpm add A
+├╯
+┊
+┴ 0dc3733 (common base, main, origin/main) 2000-01-02 add M
+
+Hint: run `but help` for all commands
+
+"#]]);
 }

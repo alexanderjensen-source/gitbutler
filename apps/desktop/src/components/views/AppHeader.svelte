@@ -43,7 +43,6 @@
 	const baseReponse = $derived(projectId ? baseBranchService.baseBranch(projectId) : undefined);
 	const base = $derived(baseReponse?.response);
 	const settingsStore = $derived(settingsService.appSettings);
-	const singleBranchMode = $derived($settingsStore?.featureFlags.singleBranch ?? false);
 	const useCustomTitleBar = $derived(!($settingsStore?.ui.useNativeTitleBar ?? false));
 	const backend = inject(BACKEND);
 	const mode = $derived(modeService.mode(projectId));
@@ -53,7 +52,7 @@
 		if (currentMode?.type === "OpenWorkspace") {
 			return "gitbutler/workspace";
 		} else if (currentMode?.type === "OutsideWorkspace") {
-			return currentMode.subject.branchName || "detached HEAD";
+			return currentMode.subject.branchName?.replace(/^refs\/heads\//, "") || "detached HEAD";
 		} else if (currentMode?.type === "Edit") {
 			return "gitbutler/edit";
 		}
@@ -77,7 +76,14 @@
 	}
 
 	const upstreamCommits = $derived(base?.behind ?? 0);
-	const isHasUpstreamCommits = $derived(upstreamCommits > 0);
+	const worktreesBehind = $derived(base?.worktreesBehind.length ?? 0);
+	const needsUpdate = $derived(!!base?.workspaceBehind || worktreesBehind > 0);
+	const updateLabel = $derived.by(() => {
+		if (upstreamCommits > 0)
+			return `${upstreamCommits} upstream ${upstreamCommits === 1 ? "commit" : "commits"}`;
+		if (worktreesBehind > 0) return "Update worktrees";
+		return "Update";
+	});
 
 	let modal = $state<ReturnType<typeof IntegrateUpstreamModal>>();
 
@@ -177,14 +183,13 @@
 	class="chrome-header"
 	class:mac={isMac}
 	data-tauri-drag-region={useCustomTitleBar}
-	class:single-branch={singleBranchMode}
 	use:focusable
 >
 	<div class="chrome-left" data-tauri-drag-region={useCustomTitleBar}>
 		<div class="chrome-left-buttons" class:has-traffic-lights={useCustomTitleBar}>
 			<SyncButton {projectId} disabled={actionsDisabled} />
 
-			{#if isHasUpstreamCommits}
+			{#if needsUpdate}
 				<Tooltip text={isDetached ? "HEAD is detached" : undefined} disabled={!isDetached}>
 					<Button
 						testId={TestId.IntegrateUpstreamCommitsButton}
@@ -192,7 +197,7 @@
 						onclick={openModal}
 						disabled={!projectId || actionsDisabled || isDetached}
 					>
-						{upstreamCommits} upstream {upstreamCommits === 1 ? "commit" : "commits"}
+						{updateLabel}
 					</Button>
 				</Tooltip>
 			{:else}
@@ -292,19 +297,17 @@
 					<span>Hold {newWindowModifierLabel} to open in a new window</span>
 				</div>
 			</Select>
-			{#if singleBranchMode}
-				<Tooltip text="Current branch">
-					<div class="chrome-current-branch" data-testid={TestId.ChromeHeaderCurrentBranch}>
-						<div class="chrome-current-branch__content">
-							<Icon name="branch" color="var(--text-2)" />
-							<span class="text-12 text-bold clr-text-2 truncate">{currentBranchName}</span>
-							{#if isNotInWorkspace}
-								<span class="text-12 text-bold clr-text-2 op-60"> read-only </span>
-							{/if}
-						</div>
+			<Tooltip text="Current branch">
+				<div class="chrome-current-branch" data-testid={TestId.ChromeHeaderCurrentBranch}>
+					<div class="chrome-current-branch__content">
+						<Icon name="branch" color="var(--text-2)" />
+						<span class="text-12 text-bold clr-text-2 truncate">{currentBranchName}</span>
+						{#if isDetached}
+							<span class="text-12 text-bold clr-text-2 op-60"> read-only </span>
+						{/if}
 					</div>
-				</Tooltip>
-			{/if}
+				</div>
+			</Tooltip>
 		</div>
 
 		<Tooltip text="Run Git Hooks">
@@ -371,7 +374,7 @@
 		overflow: hidden;
 	}
 
-	:global(.chrome-header.single-branch .project-selector-btn) {
+	:global(.chrome-header .project-selector-btn) {
 		border-top-right-radius: 0;
 		border-bottom-right-radius: 0;
 	}

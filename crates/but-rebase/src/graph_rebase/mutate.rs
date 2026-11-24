@@ -1,5 +1,3 @@
-//! Operations for mutating the editor
-
 use std::collections::HashSet;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -8,7 +6,9 @@ use petgraph::{Direction, algo::has_path_connecting, visit::EdgeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
-    Checkout, Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
+    Checkout, Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector,
+    ToSelector,
+    util::{OrderedParentKind, collect_ordered_parents},
 };
 
 /// Describes where relative to the selector a step should be inserted
@@ -53,15 +53,12 @@ where
     pub parent: P,
 }
 
-/// A set of some selectors
 #[derive(Debug, Clone)]
 pub struct SomeSelectors {
     selectors: Vec<AnySelector>,
 }
 
 impl SomeSelectors {
-    /// Creates a set of selectors from different selector input types.
-    ///
     /// Errors out if the selectors iterator is empty.
     pub fn new<T>(selectors: impl IntoIterator<Item = T>) -> Result<Self>
     where
@@ -76,13 +73,11 @@ impl SomeSelectors {
         Ok(Self { selectors })
     }
 
-    /// Returns selectors as a slice.
     pub fn as_slice(&self) -> &[AnySelector] {
         &self.selectors
     }
 }
 
-/// A heterogeneous selector input.
 #[derive(Debug, Clone)]
 pub enum AnySelector {
     /// A selector that already points into the current graph revision.
@@ -137,22 +132,15 @@ where
 /// Currently, this is used in the disconnect functionality.
 #[derive(Debug, Clone, Default)]
 pub enum SelectorSet {
-    /// Select all of the children or parents.
     #[default]
     All,
-    /// No children or parents should be selected.
     None,
-    /// A subset of children or parents should be selected.
     Some(SomeSelectors),
 }
 
-/// An enum that is helpful for describing where something should be inserted
-/// relative to.
 #[derive(Debug, Clone)]
 pub enum RelativeToRef<'a> {
-    /// Relative to a commit
     Commit(gix::ObjectId),
-    /// Relative to a reference
     Reference(&'a gix::refs::FullNameRef),
 }
 
@@ -165,13 +153,10 @@ impl ToSelector for RelativeToRef<'_> {
     }
 }
 
-/// Specifies a location relative to which a commit operation should occur.
 /// This is the fully-owned cousin of [RelativeTo].
 #[derive(Debug, Clone)]
 pub enum RelativeTo {
-    /// Relative to a commit.
     Commit(gix::ObjectId),
-    /// Relative to a reference.
     Reference(gix::refs::FullName),
 }
 
@@ -232,9 +217,7 @@ impl ToSelector for gix::refs::FullName {
     }
 }
 
-/// Operations for mutating the commit graph
 impl<M: RefMetadata> Editor<'_, '_, M> {
-    /// Get a selector to a particular commit in the graph
     pub fn select_commit(&self, target: gix::ObjectId) -> Result<Selector> {
         match self.try_select_commit(target) {
             Some(selector) => Ok(selector),
@@ -242,7 +225,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         }
     }
 
-    /// Get a selector to a particular reference in the graph
     pub fn select_reference(&self, target: &gix::refs::FullNameRef) -> Result<Selector> {
         match self.try_select_reference(target) {
             Some(selector) => Ok(selector),
@@ -252,7 +234,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         }
     }
 
-    /// Get a selector to a particular commit in the graph
     pub fn try_select_commit(&self, target: gix::ObjectId) -> Option<Selector> {
         for node_idx in self.graph.node_indices() {
             if let Step::Pick(Pick { id, .. }) = self.graph[node_idx]
@@ -265,7 +246,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         None
     }
 
-    /// Get a selector to a particular reference in the graph
     pub fn try_select_reference(&self, target: &gix::refs::FullNameRef) -> Option<Selector> {
         for node_idx in self.graph.node_indices() {
             if let Step::Reference { refname, .. } = &self.graph[node_idx]
@@ -300,6 +280,18 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .edges_directed(target.id, Direction::Outgoing)
             .map(|edge| (self.new_selector(edge.target()), edge.weight().order))
             .collect())
+    }
+
+    /// Returns the commits `target` is picked onto, in parent order, looking through
+    /// references and removed steps.
+    pub fn commit_parents(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
+        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        Ok(
+            collect_ordered_parents(&self.graph, target.id, OrderedParentKind::CommitOnly)
+                .into_iter()
+                .map(|parent| self.new_selector(parent))
+                .collect(),
+        )
     }
 
     /// For a given step, find all the references that point to it.
@@ -346,12 +338,42 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(())
     }
 
-    /// Replaces the step with [Step::None].
     pub fn replace_with_none(&mut self, target: impl ToSelector) -> Result<Step> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
         let mut step = Step::None;
         std::mem::swap(&mut self.graph[target.id], &mut step);
         Ok(step)
+    }
+
+    /// Removes a pick from history, leaving a placeholder its children look through.
+    pub fn prune(&mut self, target: impl ToCommitSelector) -> Result<()> {
+        let target = self
+            .history
+            .normalize_selector(target.to_commit_selector(self)?)?;
+        self.graph[target.id] = Step::None;
+        Ok(())
+    }
+
+    /// Removes `subjects` from history because `into` absorbed them, leaving placeholders
+    /// their children look through.
+    pub fn fold<S: ToCommitSelector>(
+        &mut self,
+        subjects: impl IntoIterator<Item = S>,
+        into: impl ToCommitSelector,
+    ) -> Result<()> {
+        let into = self
+            .history
+            .normalize_selector(into.to_commit_selector(self)?)?;
+        for subject in subjects {
+            let subject = self
+                .history
+                .normalize_selector(subject.to_commit_selector(self)?)?;
+            if subject.id == into.id {
+                bail!("A commit can't be folded into itself");
+            }
+            self.graph[subject.id] = Step::None;
+        }
+        Ok(())
     }
 
     /// Updates the pick to another pick and records a commit mapping.
@@ -382,7 +404,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(())
     }
 
-    /// Convenience function to amend a pick.
     pub fn amend_pick(&mut self, target: impl ToCommitSelector, id: gix::ObjectId) -> Result<()> {
         self.update_pick(target, |_editor, mut pick| {
             pick.id = id;
@@ -408,7 +429,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Returns an error when:
     /// - `parents_to_disconnect` is `SelectorSet::None` and `skip_reconnect_step` is false.
     /// - `parents_to_disconnect` contains any parent that is not a direct parent of `target.parent`.
-    /// - `children_to_disconnect` contains any child that is not a direct parent of `target.child`.
+    /// - `children_to_disconnect` contains any child that is not a direct child of `target.child`.
     pub fn disconnect_segment_from<C, P>(
         &mut self,
         target: SegmentDelimiter<C, P>,
@@ -475,7 +496,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .map(|e| (e.id(), e.weight().to_owned(), e.target()))
             .collect::<Vec<_>>();
 
-        // All available parents
         let available_parents = outgoing_edges
             .iter()
             .map(|(_, _, edge_target)| *edge_target)
@@ -524,18 +544,22 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 disconnected_parent_edges.push((edge_weight, edge_target));
             }
         }
+        disconnected_parent_edges.sort_by_key(|(edge_weight, _)| edge_weight.order);
 
         // 3. Disconnect children and reconnect to the disconnected parents.
-        for (edge_id, _, edge_source) in incoming_edges {
+        for (edge_id, edge_weight, edge_source) in incoming_edges {
             let should_disconnect = child_ids_to_disconnect
                 .as_ref()
                 .is_none_or(|ids| ids.contains(&edge_source));
             if should_disconnect {
-                // Remove the child edge.
                 self.graph.remove_edge(edge_id);
                 // Reconnect the child node to all the disconnected parents.
                 if !skip_reconnect_step {
-                    self.reconnect_edges_to_parents(&disconnected_parent_edges, edge_source);
+                    self.reconnect_edges_to_parents(
+                        &disconnected_parent_edges,
+                        edge_source,
+                        edge_weight.order,
+                    );
                 }
             }
         }
@@ -543,16 +567,31 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(())
     }
 
-    /// Remove the child edge, and reconnect to the right parents.
+    /// Connect `child_node` to the disconnected parents, which take over the place
+    /// `vacated_order` among its parents while its later parents move behind them.
     fn reconnect_edges_to_parents(
         &mut self,
         disconnected_parent_edges: &[(Edge, petgraph::prelude::NodeIndex)],
         child_node: petgraph::prelude::NodeIndex,
+        vacated_order: usize,
     ) {
-        // Reconnect the child node to all the disconnected parents.
-        for (parent_edge_weight, edge_target) in disconnected_parent_edges {
-            self.graph
-                .add_edge(child_node, *edge_target, parent_edge_weight.clone());
+        let later_parent_edges = self
+            .graph
+            .edges_directed(child_node, Direction::Outgoing)
+            .filter(|edge| edge.weight().order > vacated_order)
+            .map(|edge| edge.id())
+            .collect::<Vec<_>>();
+        for edge_id in later_parent_edges {
+            self.graph[edge_id].order += disconnected_parent_edges.len().saturating_sub(1);
+        }
+        for (offset, (_, edge_target)) in disconnected_parent_edges.iter().enumerate() {
+            self.graph.add_edge(
+                child_node,
+                *edge_target,
+                Edge {
+                    order: vacated_order + offset,
+                },
+            );
         }
     }
 
@@ -562,54 +601,41 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         new_parent_nodes: impl IntoIterator<Item = petgraph::prelude::NodeIndex>,
         parent_reparenting_order: ParentReparentingOrder,
     ) {
-        let mut existing_parent_edges = self
+        let position = match parent_reparenting_order {
+            // Insertion-location parents define the first-parent lane. Existing parents stay
+            // attached after them as merge-side parents.
+            ParentReparentingOrder::Prepend => Some(0),
+            ParentReparentingOrder::Append => None,
+        };
+        self.insert_parents(child_node, new_parent_nodes, position);
+    }
+
+    fn insert_parents(
+        &mut self,
+        child_node: petgraph::prelude::NodeIndex,
+        new_parent_nodes: impl IntoIterator<Item = petgraph::prelude::NodeIndex>,
+        position: Option<usize>,
+    ) {
+        let mut parent_edges = self
             .graph
             .edges_directed(child_node, Direction::Outgoing)
             .map(|edge| (edge.id(), edge.weight().order, edge.target()))
             .collect::<Vec<_>>();
-        existing_parent_edges.sort_by_key(|(_, order, _)| *order);
-
-        for (edge_id, _, _) in &existing_parent_edges {
+        parent_edges.sort_by_key(|(_, order, _)| *order);
+        for (edge_id, _, _) in &parent_edges {
             self.graph.remove_edge(*edge_id);
         }
 
-        let new_parent_nodes = new_parent_nodes.into_iter().collect::<Vec<_>>();
-        match parent_reparenting_order {
-            ParentReparentingOrder::Prepend => {
-                for (order, parent_node) in new_parent_nodes.iter().enumerate() {
-                    self.graph
-                        .add_edge(child_node, *parent_node, Edge { order });
-                }
-
-                // Insertion-location parents define the first-parent lane. Existing parents stay
-                // attached after them as merge-side parents.
-                let shifted_by = new_parent_nodes.len();
-                for (offset, (_, _, parent_node)) in existing_parent_edges.into_iter().enumerate() {
-                    self.graph.add_edge(
-                        child_node,
-                        parent_node,
-                        Edge {
-                            order: shifted_by + offset,
-                        },
-                    );
-                }
-            }
-            ParentReparentingOrder::Append => {
-                let shifted_by = existing_parent_edges.len();
-                for (order, (_, _, parent_node)) in existing_parent_edges.into_iter().enumerate() {
-                    self.graph.add_edge(child_node, parent_node, Edge { order });
-                }
-
-                for (offset, parent_node) in new_parent_nodes.into_iter().enumerate() {
-                    self.graph.add_edge(
-                        child_node,
-                        parent_node,
-                        Edge {
-                            order: shifted_by + offset,
-                        },
-                    );
-                }
-            }
+        let mut parent_nodes = parent_edges
+            .into_iter()
+            .map(|(_, _, parent_node)| parent_node)
+            .collect::<Vec<_>>();
+        let position = position.map_or(parent_nodes.len(), |position| {
+            position.min(parent_nodes.len())
+        });
+        parent_nodes.splice(position..position, new_parent_nodes);
+        for (order, parent_node) in parent_nodes.into_iter().enumerate() {
+            self.graph.add_edge(child_node, parent_node, Edge { order });
         }
     }
 
@@ -649,7 +675,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// If `nodes_to_connect` is Some:
     ///     If inserted above, connect the given nodes as children. If inserted below, connect the given nodes as parents
     ///     using `parent_reparenting_order`.
-    ///
     pub fn insert_segment_into<C, P>(
         &mut self,
         target: impl ToSelector,
@@ -679,21 +704,16 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 if let Some(nodes_to_connect) = nodes_to_connect {
                     // If there were nodes to connect defined, create edges from them into the child node of the segment
                     // being inserted.
-                    for (index, any_selector) in nodes_to_connect.as_slice().iter().enumerate() {
+                    for any_selector in nodes_to_connect.as_slice() {
                         let selector = any_selector.to_selector(self)?;
                         let node = self.history.normalize_selector(selector)?;
-                        // Avoid weight collision by adding the order value of the highest order child plus one,
-                        // accommodating for order 0.
-                        let new_weight = if let Some((_, grand_child_weight, _)) =
-                            chubbiest_grand_child.as_ref()
-                        {
-                            Edge {
-                                order: index + grand_child_weight.order + 1,
-                            }
-                        } else {
-                            Edge { order: index }
-                        };
-                        self.graph.add_edge(node.id, child.id, new_weight);
+                        let order = self
+                            .graph
+                            .edges_directed(node.id, Direction::Outgoing)
+                            .map(|edge| edge.weight().order + 1)
+                            .max()
+                            .unwrap_or(0);
+                        self.graph.add_edge(node.id, child.id, Edge { order });
                     }
                 } else {
                     let edges = self
@@ -767,7 +787,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     } else {
                         Edge { order: 0 }
                     };
-                // Connect the target to the child-most node in the given segment.
                 self.graph.add_edge(target.id, child.id, new_weight);
             }
         }
@@ -787,7 +806,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// so the first inserted/reparented parent becomes the first-parent traversal path and existing parents
     /// remain attached after them in their previous relative order. Use [`Self::insert_segment_into`] with
     /// [`ParentReparentingOrder::Append`] when existing parents should keep the lowest parent orders instead.
-    ///
     pub fn insert_segment<C, P>(
         &mut self,
         target: impl ToSelector,
@@ -815,15 +833,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(self.new_selector(new_idx))
     }
 
-    /// Inserts a new node relative to a selector
-    ///
     /// When inserting above, any nodes that point to the selector will now
     /// point to the inserted node instead, and so does a checkout of the
     /// selector. When inserting below, any nodes
     /// that the selector points to will now be pointed to by the inserted node
     /// instead.
-    ///
-    /// Returns a selector to the inserted step
     pub fn insert(
         &mut self,
         target: impl ToSelector,
@@ -831,48 +845,106 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         side: InsertSide,
     ) -> Result<Selector> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let new_idx = self.graph.add_node(step);
+        self.place(new_idx, target, side)?;
+        Ok(self.new_selector(new_idx))
+    }
+
+    /// Inserts `pick` relative to `target` as a commit split off from `source`.
+    pub fn split_off(
+        &mut self,
+        source: impl ToCommitSelector,
+        pick: Pick,
+        target: impl ToSelector,
+        side: InsertSide,
+    ) -> Result<Selector> {
+        source.to_commit_selector(self)?;
+        self.insert(target, Step::Pick(pick), side)
+    }
+
+    /// Moves a pick to sit relative to `target`.
+    ///
+    /// The children of the pick, and any checkout of it, are handed to its first parent.
+    /// Its remaining parents travel with it, behind the parents it gains at `target`.
+    /// Selectors of the pick keep selecting it.
+    pub fn move_pick(
+        &mut self,
+        subject: impl ToCommitSelector,
+        target: impl ToSelector,
+        side: InsertSide,
+    ) -> Result<()> {
+        let subject = self
+            .history
+            .normalize_selector(subject.to_commit_selector(self)?)?;
+        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        if subject.id == target.id {
+            bail!("A commit can't be moved relative to itself");
+        }
+        self.detach(subject)?;
+        self.place(subject.id, target, side)
+    }
+
+    fn detach(&mut self, subject: Selector) -> Result<()> {
+        let first_parent = self
+            .graph
+            .edges_directed(subject.id, Direction::Outgoing)
+            .min_by_key(|e| e.weight().order)
+            .map(|e| (e.id(), e.target()));
+        let children = self
+            .graph
+            .edges_directed(subject.id, Direction::Incoming)
+            .map(|e| (e.id(), e.weight().to_owned(), e.source()))
+            .collect::<Vec<_>>();
+        for (edge_id, edge_weight, child) in children {
+            self.graph.remove_edge(edge_id);
+            if let Some((_, parent)) = first_parent {
+                self.graph.add_edge(child, parent, edge_weight);
+            }
+        }
+        if let Some((edge_id, parent)) = first_parent {
+            self.graph.remove_edge(edge_id);
+            self.move_checkouts(subject, self.new_selector(parent))?;
+        }
+        Ok(())
+    }
+
+    fn place(
+        &mut self,
+        node: petgraph::prelude::NodeIndex,
+        target: Selector,
+        side: InsertSide,
+    ) -> Result<()> {
         match side {
             InsertSide::Above => {
-                let edges = self
+                let children = self
                     .graph
                     .edges_directed(target.id, Direction::Incoming)
                     .map(|e| (e.id(), e.weight().to_owned(), e.source()))
                     .collect::<Vec<_>>();
-
-                let new_idx = self.graph.add_node(step);
-                self.graph.add_edge(new_idx, target.id, Edge { order: 0 });
-
-                for (edge_id, edge_weight, edge_source) in edges {
+                self.insert_parents(node, [target.id], Some(0));
+                for (edge_id, edge_weight, child) in children {
                     self.graph.remove_edge(edge_id);
-                    self.graph.add_edge(edge_source, new_idx, edge_weight);
+                    self.graph.add_edge(child, node, edge_weight);
                 }
-
-                let inserted = self.new_selector(new_idx);
-                self.move_checkouts(target, inserted)?;
-                Ok(inserted)
+                self.move_checkouts(target, self.new_selector(node))
             }
             InsertSide::Below => {
-                let edges = self
+                let mut parents = self
                     .graph
                     .edges_directed(target.id, Direction::Outgoing)
-                    .map(|e| (e.id(), e.weight().to_owned(), e.target()))
+                    .map(|e| (e.id(), e.weight().order, e.target()))
                     .collect::<Vec<_>>();
-
-                let new_idx = self.graph.add_node(step);
-                self.graph.add_edge(target.id, new_idx, Edge { order: 0 });
-
-                for (edge_id, edge_weight, edge_target) in edges {
-                    self.graph.remove_edge(edge_id);
-                    self.graph.add_edge(new_idx, edge_target, edge_weight);
+                parents.sort_by_key(|(_, order, _)| *order);
+                for (edge_id, _, _) in &parents {
+                    self.graph.remove_edge(*edge_id);
                 }
-
-                Ok(self.new_selector(new_idx))
+                self.insert_parents(node, parents.into_iter().map(|(_, _, p)| p), Some(0));
+                self.graph.add_edge(target.id, node, Edge { order: 0 });
+                Ok(())
             }
         }
     }
 
-    /// Add an edge to the graph with a desired order.
-    ///
     /// Bails if there is already an edge from the child to the parent with the
     /// same order.
     pub fn add_edge(
@@ -903,6 +975,26 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 order: desired_order,
             },
         );
+
+        Ok(())
+    }
+
+    /// Connect `parent` to `child` as its parent at `position`, shifting later parents along,
+    /// or as its last parent if `position` is `None` or past the end.
+    pub fn insert_parent(
+        &mut self,
+        child: impl ToSelector,
+        parent: impl ToSelector,
+        position: Option<usize>,
+    ) -> Result<()> {
+        let child = self.history.normalize_selector(child.to_selector(self)?)?;
+        let parent = self.history.normalize_selector(parent.to_selector(self)?)?;
+
+        if has_path_connecting(&self.graph, parent.id, child.id, None) {
+            bail!("BUG: Inserting a parent introduces a cycle");
+        }
+
+        self.insert_parents(child.id, [parent.id], position);
 
         Ok(())
     }

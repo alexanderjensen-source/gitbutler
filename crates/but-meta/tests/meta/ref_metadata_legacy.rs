@@ -22,38 +22,17 @@ use snapbox::prelude::*;
 #[test]
 fn journey() -> anyhow::Result<()> {
     let (mut store, _tmp) = vb_store_rw("virtual-branches-01")?;
+    let writable_toml_path = store.path().to_owned();
 
     assert_eq!(store.iter().count(), 15, "There are items to test on");
     roundtrip_journey(&mut store)?;
-    let writable_toml_path = store.path().to_owned();
     drop(store);
-    // The file exists, but is empty and valid. This is handled correctly by code
-    // that cares about the file.
-    snapbox::assert_data_eq!(
-        std::fs::read_to_string(&writable_toml_path)?,
-        snapbox::str![[r#"
-[branches]
-
-"#]]
-    );
 
     let store = VirtualBranchesTomlMetadata::from_path(&writable_toml_path)?;
     assert_eq!(
         store.iter().count(),
         0,
-        "on drop we write the file immediately"
-    );
-    drop(store);
-    assert!(
-        writable_toml_path.exists(),
-        "default content is mirrored back to TOML"
-    );
-    snapbox::assert_data_eq!(
-        std::fs::read_to_string(&writable_toml_path)?,
-        snapbox::str![[r#"
-[branches]
-
-"#]]
+        "on drop the cleared metadata is written to the database"
     );
 
     Ok(())
@@ -61,20 +40,21 @@ fn journey() -> anyhow::Result<()> {
 
 #[test]
 fn read_only_store_does_not_write_on_drop() -> anyhow::Result<()> {
-    let tmp = TempDir::new()?;
-    let writable_toml_path = tmp.path().join("vb.toml");
-    std::fs::copy(vb_fixture("virtual-branches-01"), &writable_toml_path)?;
-    let original = std::fs::read_to_string(&writable_toml_path)?;
+    let (store, _tmp) = vb_store_rw("virtual-branches-01")?;
+    let path = store.path().to_owned();
+    drop(store);
 
     {
-        let mut store = VirtualBranchesTomlMetadata::from_path_read_only(&writable_toml_path)?;
+        let mut store = VirtualBranchesTomlMetadata::from_path_read_only(&path)?;
         store.data_mut().branches.clear();
         store.set_changed_to_necessitate_write();
     }
 
     assert_eq!(
-        std::fs::read_to_string(&writable_toml_path)?,
-        original,
+        VirtualBranchesTomlMetadata::from_path(&path)?
+            .iter()
+            .count(),
+        15,
         "read-only metadata is projection input and must not reconcile or persist on drop"
     );
     Ok(())
@@ -133,18 +113,18 @@ fn managed_workspace_order_is_available_to_ad_hoc_workspaces() -> anyhow::Result
 fn writable_store_does_not_reconcile_on_drop() -> anyhow::Result<()> {
     let (repo, _tmp) = but_testsupport::writable_scenario("dlib-standin");
     let path = repo.path().join("virtual_branches.toml");
-    std::fs::copy(vb_fixture("non-unique-branches"), &path)?;
+    write_fixture_to_db("non-unique-branches", &path)?;
 
     let mut store = VirtualBranchesTomlMetadata::from_path(&path)?;
     store.set_changed_to_necessitate_write();
     store.write_unreconciled()?;
-    let unreconciled = std::fs::read_to_string(&path)?;
+    let unreconciled = store.data().clone();
     store.set_changed_to_necessitate_write();
     drop(store);
 
     assert_eq!(
-        std::fs::read_to_string(path)?,
-        unreconciled,
+        VirtualBranchesTomlMetadata::from_path_read_only(&path)?.data(),
+        &unreconciled,
         "dropping writable metadata must persist without reconciling it against the workspace"
     );
     Ok(())
@@ -154,7 +134,7 @@ fn writable_store_does_not_reconcile_on_drop() -> anyhow::Result<()> {
 fn read_only() -> anyhow::Result<()> {
     let (mut store, _tmp) = vb_store_rw("virtual-branches-01")?;
     let ws = store.workspace("refs/heads/gitbutler/workspace".try_into()?)?;
-    assert!(!ws.is_default(), "value read from file");
+    assert!(!ws.is_default(), "value read from the database");
     let (actual, uuids) = sanitize_uuids_and_timestamps_with_mapping(debug_str(&ws.stacks));
     snapbox::assert_data_eq!(
         actual,
@@ -390,25 +370,11 @@ fn read_only() -> anyhow::Result<()> {
 "#]]
     );
 
-    let toml_path = store.path().to_owned();
-    assert!(toml_path.exists(), "the file is still present");
-    let toml_content = std::fs::read_to_string(&toml_path)?;
     let was_deleted = store.remove("refs/heads/gitbutler/workspace".try_into()?)?;
     assert!(was_deleted, "This basically clears out everything");
-    assert!(
-        toml_path.exists(),
-        "workspace clear keeps an empty TOML mirror"
-    );
-    // The file exists, but is empty and valid. This is handled correctly by code
-    // that cares about the file.
-    assert_eq!(
-        std::fs::read_to_string(&toml_path)?,
-        toml_content,
-        "The content of the toml file didn't change as syncing happens on drop"
-    );
 
     // Asking for the workspace
-    let ws = store.workspace("refs/heads/gitbutler/integration".try_into()?)?;
+    let ws = store.workspace("refs/heads/gitbutler/workspace".try_into()?)?;
     assert!(
         ws.is_default(),
         "The workspace was deleted so it doesn't exist anymore"
@@ -423,17 +389,6 @@ fn read_only() -> anyhow::Result<()> {
         store.iter().count(),
         0,
         "deleting the workspace deletes all stacks, at least in this backend"
-    );
-
-    drop(store);
-
-    assert!(toml_path.exists(), "the TOML mirror stays available");
-    snapbox::assert_data_eq!(
-        std::fs::read_to_string(&toml_path)?,
-        snapbox::str![[r#"
-[branches]
-
-"#]]
     );
 
     Ok(())
@@ -465,7 +420,7 @@ Workspace {
         id: stack_id1,
         workspacecommit_relation: Merged,
         branches: vec![WorkspaceStackBranch {
-            ref_name: branch1.clone(),
+            ref_name: branch1,
             archived: false,
         }],
     });
@@ -473,7 +428,7 @@ Workspace {
         id: stack_id2,
         workspacecommit_relation: Outside,
         branches: vec![WorkspaceStackBranch {
-            ref_name: branch2.clone(),
+            ref_name: branch2,
             archived: false,
         }],
     });
@@ -716,14 +671,6 @@ fn create_workspace_and_stacks_with_branches_from_scratch() -> anyhow::Result<()
     let branch_name: gix::refs::FullName = "refs/heads/feat".try_into()?;
     let mut branch = store.branch(branch_name.as_ref())?;
     assert!(branch.is_default(), "nothing was there yet");
-    assert!(toml_path.exists(), "TOML mirror exists from initialization");
-    snapbox::assert_data_eq!(
-        std::fs::read_to_string(&toml_path)?,
-        snapbox::str![[r#"
-[branches]
-
-"#]]
-    );
     assert_eq!(branch.stack_id(), None, "default values have no stack-id");
 
     branch.review = but_core::ref_metadata::Review {
@@ -845,9 +792,9 @@ fn create_workspace_and_stacks_with_branches_from_scratch() -> anyhow::Result<()
 
     drop(store);
 
-    assert!(toml_path.exists(), "file was written due to change");
-    let (actual, uuids) =
-        sanitize_uuids_and_timestamps_with_mapping(std::fs::read_to_string(&toml_path)?);
+    let (actual, uuids) = sanitize_uuids_and_timestamps_with_mapping(toml::to_string(
+        VirtualBranchesTomlMetadata::from_path_read_only(&toml_path)?.data(),
+    )?);
     snapbox::assert_data_eq!(
         actual,
         snapbox::str![[r#"
@@ -885,7 +832,7 @@ CommitId = "0000000000000000000000000000000000000000"
     );
     assert!(
         uuids.contains_key(&id.to_string()),
-        "the written file also contains the id we have set for the first branch, which is a stack now."
+        "the saved metadata also contains the id we have set for the first branch, which is a stack now."
     );
 
     let mut store = VirtualBranchesTomlMetadata::from_path(&toml_path)?;
@@ -1105,16 +1052,12 @@ Workspace {
     );
 
     drop(store);
-    snapbox::assert_data_eq!(
-        std::fs::read_to_string(&toml_path)?,
-        snapbox::str![[r#"
-[branches]
-
-"#]]
-    );
     assert!(
-        toml_path.exists(),
-        "default state is still mirrored into TOML"
+        VirtualBranchesTomlMetadata::from_path_read_only(&toml_path)?
+            .data()
+            .branches
+            .is_empty(),
+        "removing the workspace saves empty metadata"
     );
 
     Ok(())
@@ -1123,7 +1066,7 @@ Workspace {
 #[test]
 fn create_workspace_from_scratch_workspace_first() -> anyhow::Result<()> {
     let (mut store, _tmp) = empty_vb_store_rw()?;
-    let workspace_name = "refs/heads/gitbutler/integration".try_into()?;
+    let workspace_name = "refs/heads/gitbutler/workspace".try_into()?;
     let mut ws = store.workspace(workspace_name)?;
     ws.stacks.push(WorkspaceStack {
         id: StackId::from_number_for_testing(1),
@@ -1341,12 +1284,17 @@ fn vb_fixture(name: &str) -> PathBuf {
     format!("tests/fixtures/legacy/{name}.toml").into()
 }
 
+fn write_fixture_to_db(name: &str, toml_path: &std::path::Path) -> anyhow::Result<()> {
+    let vb: but_meta::virtual_branches_legacy_types::VirtualBranches =
+        toml::from_str(&std::fs::read_to_string(vb_fixture(name))?)?;
+    but_meta::legacy_storage::write_virtual_branches_and_sync(toml_path, &vb)
+}
+
 fn vb_store_rw(name: &str) -> anyhow::Result<(VirtualBranchesTomlMetadata, TempDir)> {
     let tmp = TempDir::new()?;
-    let writable_toml_path = tmp.path().join("vb.toml");
-    std::fs::copy(vb_fixture(name), &writable_toml_path)?;
-
-    let store = VirtualBranchesTomlMetadata::from_path(&writable_toml_path)?;
+    let toml_path = tmp.path().join("vb.toml");
+    write_fixture_to_db(name, &toml_path)?;
+    let store = VirtualBranchesTomlMetadata::from_path(&toml_path)?;
     Ok((store, tmp))
 }
 
@@ -1639,7 +1587,9 @@ fn preserves_duplicate_heads_if_they_map_to_the_same_workspace_segment() -> anyh
     let path = repo.path().join("virtual_branches.toml");
     let mut store = VirtualBranchesTomlMetadata::from_path(&path)?;
     but_core::ref_metadata::ProjectMeta {
-        target_ref: Some("refs/remotes/origin/main".try_into()?),
+        target_ref: Some(but_core::ref_metadata::LocalRefName::new(
+            "refs/heads/main".try_into()?,
+        )?),
         target_commit_id: None,
         push_remote: Some("origin".into()),
     }
@@ -1700,7 +1650,9 @@ fn removes_within_stack_duplicate_heads_even_when_mapped_to_a_segment_13345() ->
     let path = repo.path().join("virtual_branches.toml");
     let mut store = VirtualBranchesTomlMetadata::from_path(&path)?;
     but_core::ref_metadata::ProjectMeta {
-        target_ref: Some("refs/remotes/origin/main".try_into()?),
+        target_ref: Some(but_core::ref_metadata::LocalRefName::new(
+            "refs/heads/main".try_into()?,
+        )?),
         target_commit_id: None,
         push_remote: Some("origin".into()),
     }
@@ -1880,7 +1832,6 @@ fn falls_back_to_in_memory_db_when_persistent_db_open_fails() -> anyhow::Result<
 
     let tmp = tempdir()?;
     let toml_path = tmp.path().join("virtual_branches.toml");
-    std::fs::write(&toml_path, "[branches]\n")?;
 
     let original_permissions = std::fs::metadata(tmp.path())?.permissions();
     let mut read_only_permissions = original_permissions.clone();
